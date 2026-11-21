@@ -1,0 +1,47 @@
+# ModelMesh — Response Cache Configuration
+# -----------------------------------------
+# A cached answer is replayed instead of calling the model whenever the
+# incoming prompt matches a previously stored entry.  This is a full-answer
+# cache (NOT provider-side prefix caching and NOT the routing decision cache).
+#
+# All fields shown here are the defaults.  Delete the whole file to restore
+# defaults; a missing file is treated the same as this file unchanged.
+
+# Master switch — set to false to disable all cache reads and writes.
+enabled: true
+
+# Seconds before a cache entry is considered stale (default: 24 hours).
+ttl_seconds: 86400
+
+# Maximum number of entries kept in the response_cache table.
+# When exceeded, the entry with the oldest last_hit_at timestamp is evicted.
+max_entries: 2000
+
+# Answers shorter than this are not stored (guards against empty/trivial hits).
+min_answer_chars: 1
+
+# Answers longer than this are not stored (protects the DB from huge blobs).
+max_answer_chars: 20000
+
+# When replaying a cached answer the text is emitted as successive TEXT_DELTA
+# chunks of approximately this many characters each.
+replay_chunk_chars: 40
+
+# --- Semantic (embedding-based) similarity matching -------------------------
+# When disabled (default) only exact-key matches are used.
+semantic:
+  # Set to true to also compare embeddings of incoming prompts against stored
+  # entries that share the same context_hash + system_hash + params_hash.
+  enabled: false
+
+  # Cosine-similarity threshold above which a stored entry is considered a hit.
+  # Higher = more conservative (fewer false hits).
+  threshold: 0.92
+
+  # Embedding backend to use.
+  #   hashing        — dependency-free SimHash approximation (fast, imprecise).
+  #   sentence_transformers — requires `pip install sentence-transformers`.
+  embedder: hashing
+
+  # Model name used by the sentence_transformers backend (ignored for hashing).
+  model_name: all-MiniLM-L6-v2

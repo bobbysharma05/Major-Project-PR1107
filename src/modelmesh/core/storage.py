@@ -18,7 +18,7 @@ from modelmesh.core.types import (
     Usage,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 PRAGMA journal_mode = WAL;
@@ -131,11 +131,34 @@ CREATE TABLE IF NOT EXISTS tool_runs (
     FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS response_cache (
+    key TEXT PRIMARY KEY,
+    norm_prompt TEXT NOT NULL,
+    context_hash TEXT NOT NULL,
+    system_hash TEXT NOT NULL,
+    params_hash TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    answer_text TEXT NOT NULL,
+    model_id TEXT,
+    endpoint_id TEXT,
+    provider_id TEXT,
+    tokens_in INTEGER DEFAULT 0,
+    tokens_out INTEGER DEFAULT 0,
+    cost_usd REAL DEFAULT 0.0,
+    created_at REAL NOT NULL,
+    ttl_seconds INTEGER NOT NULL,
+    hit_count INTEGER DEFAULT 0,
+    last_hit_at REAL,
+    embedding BLOB
+);
+
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_routing_created ON routing_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_routing_endpoint ON routing_log(chosen_endpoint_id);
 CREATE INDEX IF NOT EXISTS idx_score_snapshots_source ON score_snapshots(source, fetched_at);
 CREATE INDEX IF NOT EXISTS idx_decision_cache_created ON decision_cache(created_at);
+CREATE INDEX IF NOT EXISTS idx_response_cache_created ON response_cache(created_at);
+CREATE INDEX IF NOT EXISTS idx_response_cache_ctx ON response_cache(context_hash, system_hash, params_hash, scope);
 
 CREATE VIEW IF NOT EXISTS endpoint_stats AS
 SELECT
@@ -235,6 +258,37 @@ class Storage:
                 for col_name, col_type in new_columns:
                     if col_name not in existing_cols:
                         conn.execute(f"ALTER TABLE routing_log ADD COLUMN {col_name} {col_type};")
+
+                # Schema v3: response_cache table (CREATE TABLE IF NOT EXISTS handles
+                # existing databases safely; indexes are also idempotent).
+                conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS response_cache (
+                        key TEXT PRIMARY KEY,
+                        norm_prompt TEXT NOT NULL,
+                        context_hash TEXT NOT NULL,
+                        system_hash TEXT NOT NULL,
+                        params_hash TEXT NOT NULL,
+                        scope TEXT NOT NULL,
+                        answer_text TEXT NOT NULL,
+                        model_id TEXT,
+                        endpoint_id TEXT,
+                        provider_id TEXT,
+                        tokens_in INTEGER DEFAULT 0,
+                        tokens_out INTEGER DEFAULT 0,
+                        cost_usd REAL DEFAULT 0.0,
+                        created_at REAL NOT NULL,
+                        ttl_seconds INTEGER NOT NULL,
+                        hit_count INTEGER DEFAULT 0,
+                        last_hit_at REAL,
+                        embedding BLOB
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_response_cache_created
+                        ON response_cache(created_at);
+                    CREATE INDEX IF NOT EXISTS idx_response_cache_ctx
+                        ON response_cache(context_hash, system_hash, params_hash, scope);
+                    """
+                )
 
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
                 conn.commit()
@@ -711,6 +765,218 @@ class Storage:
                     ),
                 )
                 conn.commit()
+
+    # --- Response Cache Operations ---
+
+    def get_cache_entry(
+        self,
+        key: str,
+        now: Optional[float] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the response_cache row for *key* if it exists and has not expired.
+
+        Expiry is checked by comparing ``created_at + ttl_seconds`` against
+        *now* (defaults to ``time.time()``).  Expired rows are **not** deleted
+        here; call :meth:`purge_expired_cache` for that.
+
+        Args:
+            key: SHA-256 hex cache key.
+            now: Unix timestamp to use as "current time" (injected in tests).
+
+        Returns:
+            A plain ``dict`` of the row (all columns), or ``None`` on miss/expiry.
+        """
+        ts = now if now is not None else time.time()
+        with self._lock:
+            with self._get_connection() as conn:
+                row = conn.execute(
+                    "SELECT * FROM response_cache WHERE key = ?",
+                    (key,),
+                ).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        if ts > d["created_at"] + d["ttl_seconds"]:
+            return None  # expired — do not expose stale data
+        return d
+
+    def put_cache_entry(
+        self,
+        key: str,
+        norm_prompt: str,
+        context_hash: str,
+        system_hash: str,
+        params_hash: str,
+        scope: str,
+        answer_text: str,
+        ttl_seconds: int,
+        model_id: Optional[str] = None,
+        endpoint_id: Optional[str] = None,
+        provider_id: Optional[str] = None,
+        tokens_in: int = 0,
+        tokens_out: int = 0,
+        cost_usd: float = 0.0,
+        embedding: Optional[bytes] = None,
+        max_entries: int = 2000,
+    ) -> None:
+        """Insert or replace a response_cache entry, then evict the oldest row
+        if the table now exceeds *max_entries*.
+
+        Eviction policy: the row with the smallest ``last_hit_at`` value is
+        removed.  Rows that have never been hit use their ``created_at`` as a
+        proxy (they sort before any hit row of the same age).
+
+        Args:
+            key: SHA-256 hex cache key.
+            norm_prompt: Normalised text of the last user message.
+            context_hash: SHA-256 of the conversation context preceding the
+                last user message.
+            system_hash: SHA-256 of the effective system prompt.
+            params_hash: SHA-256 of the generation parameters.
+            scope: Pinned ``endpoint_id`` or the literal ``"auto"``.
+            answer_text: The final answer text to cache.
+            ttl_seconds: Seconds until this entry is considered stale.
+            model_id: Model that produced the answer.
+            endpoint_id: Endpoint that produced the answer.
+            provider_id: Provider that produced the answer.
+            tokens_in: Input token count from the original turn.
+            tokens_out: Output token count from the original turn.
+            cost_usd: Cost of the original turn in USD.
+            embedding: Optional serialised embedding vector (BLOB).
+            max_entries: Maximum allowed rows; triggers eviction when exceeded.
+        """
+        now = time.time()
+        with self._lock:
+            with self._get_connection() as conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO response_cache (
+                        key, norm_prompt, context_hash, system_hash,
+                        params_hash, scope, answer_text, model_id,
+                        endpoint_id, provider_id, tokens_in, tokens_out,
+                        cost_usd, created_at, ttl_seconds, hit_count,
+                        last_hit_at, embedding
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                    """,
+                    (
+                        key,
+                        norm_prompt,
+                        context_hash,
+                        system_hash,
+                        params_hash,
+                        scope,
+                        answer_text,
+                        model_id,
+                        endpoint_id,
+                        provider_id,
+                        tokens_in,
+                        tokens_out,
+                        cost_usd,
+                        now,
+                        ttl_seconds,
+                        now,  # last_hit_at = created_at on first insert
+                        embedding,
+                    ),
+                )
+                # Enforce max_entries: evict the row least recently hit.
+                count_row = conn.execute(
+                    "SELECT COUNT(*) FROM response_cache"
+                ).fetchone()
+                if count_row and count_row[0] > max_entries:
+                    conn.execute(
+                        """
+                        DELETE FROM response_cache
+                        WHERE key = (
+                            SELECT key FROM response_cache
+                            ORDER BY COALESCE(last_hit_at, created_at) ASC
+                            LIMIT 1
+                        )
+                        """
+                    )
+                conn.commit()
+
+    def touch_cache_entry(self, key: str) -> None:
+        """Increment ``hit_count`` and update ``last_hit_at`` for *key*.
+
+        Called on every cache hit so eviction can prefer entries that have
+        not been used recently.  A missing key is silently ignored.
+
+        Args:
+            key: SHA-256 hex cache key.
+        """
+        now = time.time()
+        with self._lock:
+            with self._get_connection() as conn:
+                conn.execute(
+                    """
+                    UPDATE response_cache
+                    SET hit_count = hit_count + 1,
+                        last_hit_at = ?
+                    WHERE key = ?
+                    """,
+                    (now, key),
+                )
+                conn.commit()
+
+    def purge_expired_cache(self, now: Optional[float] = None) -> int:
+        """Delete all expired response_cache rows and return the count removed.
+
+        An entry is expired when ``time() > created_at + ttl_seconds``.
+
+        Args:
+            now: Unix timestamp to treat as "current time" (injected in tests).
+
+        Returns:
+            Number of rows deleted.
+        """
+        ts = now if now is not None else time.time()
+        with self._lock:
+            with self._get_connection() as conn:
+                cur = conn.execute(
+                    "DELETE FROM response_cache WHERE ? > created_at + ttl_seconds",
+                    (ts,),
+                )
+                conn.commit()
+                return cur.rowcount
+
+    def clear_response_cache(self) -> int:
+        """Delete **all** response_cache rows and return the count removed.
+
+        Returns:
+            Number of rows deleted.
+        """
+        with self._lock:
+            with self._get_connection() as conn:
+                cur = conn.execute("DELETE FROM response_cache")
+                conn.commit()
+                return cur.rowcount
+
+    def response_cache_stats(self) -> Dict[str, Any]:
+        """Return aggregate statistics about the response_cache table.
+
+        Returns:
+            A plain ``dict`` with keys:
+
+            * ``entries`` – total number of rows.
+            * ``total_hits`` – sum of ``hit_count`` across all rows.
+            * ``expired_entries`` – rows where ``time() > created_at + ttl_seconds``.
+        """
+        now = time.time()
+        with self._lock:
+            with self._get_connection() as conn:
+                row = conn.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS entries,
+                        COALESCE(SUM(hit_count), 0) AS total_hits,
+                        COALESCE(SUM(
+                            CASE WHEN ? > created_at + ttl_seconds THEN 1 ELSE 0 END
+                        ), 0) AS expired_entries
+                    FROM response_cache
+                    """,
+                    (now,),
+                ).fetchone()
+        return dict(row) if row else {"entries": 0, "total_hits": 0, "expired_entries": 0}
 
     def get_usage_summary(self) -> Dict[str, Any]:
         """Aggregate usage metrics by model, provider/endpoint, and overall total."""
