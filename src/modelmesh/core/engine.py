@@ -1,9 +1,12 @@
 import json
+import logging
 import re
 import threading
 import time
 from typing import Any, Dict, Iterator, List, Optional
 
+from modelmesh.core.cache.config import CacheConfig, load_cache_config
+from modelmesh.core.cache.keys import CacheKeyParts, build_cache_key, is_cacheable_request
 from modelmesh.core.cost import calculate_cost, estimate_request_tokens
 from modelmesh.core.errors import ProviderError, RoutingError
 from modelmesh.core.formatting import get_base_system_prompt
@@ -25,6 +28,8 @@ from modelmesh.core.types import (
     Usage,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class ChatEngine:
     """Core engine driving conversation turns, provider dispatch, tool loops, and failover."""
@@ -36,12 +41,21 @@ class ChatEngine:
         storage: Optional[Any] = None,
         tool_registry: Optional[ToolRegistry] = None,
         skill_loader: Optional[SkillLoader] = None,
+        cache_config: Optional[CacheConfig] = None,
     ) -> None:
         self.registry = registry
         self.router = router
         self.storage = storage
         self.tool_registry = tool_registry
         self.skill_loader = skill_loader
+        if cache_config is not None:
+            self.cache_config = cache_config
+        else:
+            try:
+                self.cache_config = load_cache_config()
+            except Exception as exc:  # Cache must never prevent a chat turn.
+                logger.warning("Cache configuration unavailable: %s. Using defaults.", exc)
+                self.cache_config = CacheConfig()
 
     def _health_tracker(self) -> Optional[Any]:
         """Return the router's endpoint health tracker, if any."""
@@ -73,6 +87,7 @@ class ChatEngine:
         pinned_endpoint_id: Optional[str] = None,
         seed: Optional[int] = None,
         profile: Optional[str] = None,
+        bypass_cache: bool = False,
     ) -> Iterator[StreamEvent]:
         """Execute a full conversation turn with routing, streaming, tool loop, and fallback.
 
@@ -135,6 +150,134 @@ class ChatEngine:
             required_capabilities=request.required_capabilities,
         )
 
+        # The base prompt carries a "Current date" line.  Exclude it from the
+        # cache key so the same question asked on a different day still hits.
+        cache_system_prompt = "\n\n".join(p for p in prompt_parts[1:] if p)
+        cache_key_parts: Optional[CacheKeyParts] = None
+        cache_hit = False
+        cacheable, _cache_reason = is_cacheable_request(current_request)
+        cache_entry: Optional[Dict[str, Any]] = None
+        cached_candidate: Optional[Candidate] = None
+
+        if self.cache_config.enabled and self.storage is not None and cacheable:
+            try:
+                cache_scope = (
+                    candidate.endpoint_id
+                    if candidate is not None
+                    else pinned_endpoint_id or pinned_model_id
+                )
+                cache_key_parts = build_cache_key(
+                    current_request, cache_system_prompt, cache_scope
+                )
+                if not bypass_cache:
+                    cache_entry = self.storage.get_cache_entry(cache_key_parts.key)
+                    if cache_entry is not None:
+                        stored_endpoint = cache_entry.get("endpoint_id")
+                        if stored_endpoint:
+                            cached_candidate = self.registry.get_candidate(stored_endpoint)
+                        if cached_candidate is None:
+                            stored_model = cache_entry.get("model_id")
+                            if stored_model:
+                                cached_candidate = next(
+                                    (
+                                        c
+                                        for c in self.registry.candidates()
+                                        if c.model_id == stored_model
+                                    ),
+                                    None,
+                                )
+            except Exception as exc:
+                logger.warning("Response cache lookup failed: %s", exc)
+                cache_key_parts = None
+                cache_entry = None
+                cached_candidate = None
+
+        if (
+            cache_entry is not None
+            and cached_candidate is not None
+            and cache_key_parts is not None
+        ):
+            cache_hit = True
+            answer_text = str(cache_entry.get("answer_text") or "")
+            saved_cost = float(cache_entry.get("cost_usd") or 0.0)
+            saved_in = int(cache_entry.get("tokens_in") or 0)
+            saved_out = int(cache_entry.get("tokens_out") or 0)
+            cache_block: Dict[str, Any] = {
+                "status": "hit",
+                "kind": "exact",
+                "similarity": 1.0,
+                "saved_cost_usd": saved_cost,
+                "saved_tokens_in": saved_in,
+                "saved_tokens_out": saved_out,
+            }
+            replay_usage = Usage(input_tokens=saved_in, output_tokens=saved_out)
+            replay_decision = RoutingDecision(
+                chosen_candidate=cached_candidate,
+                fallback_chain=[],
+                strategy_name=strategy_name,
+                reason="Served from response cache",
+                request_features={"cache": cache_block},
+            )
+            replay_metadata = routing_metadata(replay_decision)
+            replay_metadata["cache"] = cache_block
+
+            yield StreamEvent(
+                type=StreamEventType.ROUTED,
+                data={
+                    "candidate": cached_candidate,
+                    "strategy": strategy_name,
+                    "reason": "Served from response cache",
+                    "decision_id": replay_decision.decision_id,
+                    "metadata": replay_metadata,
+                },
+            )
+
+            chunk_size = max(1, self.cache_config.replay_chunk_chars)
+            for offset in range(0, len(answer_text), chunk_size):
+                if cancel_event and cancel_event.is_set():
+                    return
+                yield StreamEvent(
+                    type=StreamEventType.TEXT_DELTA,
+                    text=answer_text[offset : offset + chunk_size],
+                )
+
+            replay_latency = time.time() - start_time
+            try:
+                record_turn(
+                    self.storage,
+                    replay_decision,
+                    answered_by=cached_candidate,
+                    usage=replay_usage,
+                    cost_usd=0.0,
+                    latency_ms=int(replay_latency * 1000),
+                    ttft_ms=0,
+                    conversation_id=conversation_id,
+                    cache_status="hit",
+                )
+            except Exception as exc:
+                logger.warning("Cache hit routing log failed: %s", exc)
+            yield StreamEvent(type=StreamEventType.USAGE, usage=replay_usage)
+            yield StreamEvent(
+                type=StreamEventType.DONE,
+                usage=replay_usage,
+                finish_reason="stop",
+                data={
+                    "candidate": cached_candidate,
+                    "cost_usd": 0.0,
+                    "latency_sec": round(replay_latency, 3),
+                    "strategy": strategy_name,
+                    "reason": "Served from response cache",
+                    "decision_id": replay_decision.decision_id,
+                    "metadata": replay_metadata,
+                    "ttft_sec": 0.0,
+                },
+            )
+            try:
+                self.storage.touch_cache_entry(cache_key_parts.key)
+            except Exception as exc:
+                logger.warning("Cache touch failed: %s", exc)
+            return
+
         if candidate is not None:
             # Candidate explicitly pinned by caller
             candidates_to_try = [candidate]
@@ -187,6 +330,7 @@ class ChatEngine:
         last_error: Optional[ProviderError] = None
         last_failed_cand: Optional[Candidate] = None
         successful_candidate: Optional[Candidate] = None
+        tool_calls_executed = False
         time_to_first_token: Optional[float] = None
 
         total_input_tokens = 0
@@ -338,6 +482,7 @@ class ChatEngine:
 
                 # Check if model requested tool calls
                 if tool_calls_this_iter:
+                    tool_calls_executed = True
                     # Append assistant message with tool calls
                     assistant_msg = Message(
                         role="assistant",
@@ -464,6 +609,41 @@ class ChatEngine:
                 conversation_id=conversation_id,
             )
 
+        if (
+            self.cache_config.enabled
+            and self.storage is not None
+            and cache_key_parts is not None
+            and not cache_hit
+            and not tool_calls_executed
+            and self.cache_config.min_answer_chars
+            <= len(accumulated_turn_text)
+            <= self.cache_config.max_answer_chars
+        ):
+            try:
+                self.storage.put_cache_entry(
+                    key=cache_key_parts.key,
+                    norm_prompt=cache_key_parts.norm_prompt,
+                    context_hash=cache_key_parts.context_hash,
+                    system_hash=cache_key_parts.system_hash,
+                    params_hash=cache_key_parts.params_hash,
+                    scope=cache_key_parts.scope,
+                    answer_text=accumulated_turn_text,
+                    ttl_seconds=self.cache_config.ttl_seconds,
+                    model_id=successful_candidate.model_id,
+                    endpoint_id=successful_candidate.endpoint_id,
+                    provider_id=successful_candidate.provider_id,
+                    tokens_in=final_usage.input_tokens,
+                    tokens_out=final_usage.output_tokens,
+                    cost_usd=cost_usd,
+                    max_entries=self.cache_config.max_entries,
+                )
+            except Exception as exc:
+                logger.warning("Response cache store failed: %s", exc)
+
+        done_metadata = routing_metadata(decision, successful_candidate) if decision else {}
+        if cacheable:
+            done_metadata["cache"] = {"status": "miss"}
+
         yield StreamEvent(
             type=StreamEventType.USAGE,
             usage=final_usage,
@@ -480,7 +660,7 @@ class ChatEngine:
                 "strategy": decision.strategy_name if decision else strategy_name,
                 "reason": decision.reason if decision else "",
                 "decision_id": decision.decision_id if decision else "",
-                "metadata": routing_metadata(decision, successful_candidate) if decision else {},
+                "metadata": done_metadata,
                 "ttft_sec": round(time_to_first_token or 0.0, 3),
             },
         )

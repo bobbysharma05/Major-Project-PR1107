@@ -78,8 +78,13 @@ def record_turn(
     latency_ms: int,
     ttft_ms: int,
     conversation_id: Optional[str],
+    cache_status: str = "miss",
 ) -> None:
-    """Write one routing_log row (with Smart fields when Smart routed the turn)."""
+    """Write one routing_log row (with Smart fields when Smart routed the turn).
+
+    ``cache_status`` marks response-cache replay turns; ordinary calls keep the
+    default ``"miss"``.
+    """
     features = decision.request_features or {}
     smart_dec = features.get("smart_decision")
     common = dict(
@@ -90,6 +95,7 @@ def record_turn(
         latency_ms=latency_ms,
         ttft_ms=ttft_ms,
         conversation_id=conversation_id,
+        cache_status=cache_status,
     )
     if smart_dec is None and decision.strategy_name != "smart_clef":
         storage.record_routing_log(**common)

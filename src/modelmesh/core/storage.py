@@ -477,6 +477,7 @@ class Storage:
         conversation_id: Optional[str] = None,
         message_id: Optional[str] = None,
         error_category: Optional[str] = None,
+        cache_status: str = "miss",
     ) -> str:
         log_id = decision.decision_id or str(uuid.uuid4())
         fallback_ids = [c.endpoint_id for c in decision.fallback_chain]
@@ -506,7 +507,7 @@ class Storage:
                         json.dumps(decision.eligible_candidates),
                         json.dumps(decision.request_features),
                         decision.reason,
-                        "miss",
+                        cache_status,
                         ttft_ms,
                         latency_ms,
                         usage.input_tokens,
@@ -531,6 +532,7 @@ class Storage:
         conversation_id: Optional[str] = None,
         message_id: Optional[str] = None,
         error_category: Optional[str] = None,
+        cache_status: str = "miss",
         decision_source: str = "none",
         decision_provider_id: Optional[str] = None,
         rubric_version: Optional[int] = None,
@@ -584,7 +586,7 @@ class Storage:
                         json.dumps(decision.eligible_candidates),
                         json.dumps(decision.request_features),
                         decision.reason,
-                        "hit" if decision_source == "cache" else "miss",
+                        "hit" if cache_status == "hit" or decision_source == "cache" else cache_status,
                         ttft_ms,
                         latency_ms,
                         usage.input_tokens,
