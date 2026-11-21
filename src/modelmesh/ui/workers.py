@@ -44,6 +44,7 @@ class ChatWorker(QThread):
         pinned_endpoint_id: Optional[str] = None,
         conversation_id: Optional[str] = None,
         profile: Optional[str] = None,
+        bypass_cache: bool = False,
         parent: Optional[Any] = None,
     ) -> None:
         super().__init__(parent)
@@ -54,6 +55,7 @@ class ChatWorker(QThread):
         self.pinned_model_id = pinned_model_id
         self.pinned_endpoint_id = pinned_endpoint_id
         self.conversation_id = conversation_id
+        self.bypass_cache = bypass_cache
         self.cancel_event = threading.Event()
 
     def stop(self) -> None:
@@ -76,6 +78,7 @@ class ChatWorker(QThread):
                 pinned_model_id=self.pinned_model_id,
                 pinned_endpoint_id=self.pinned_endpoint_id,
                 profile=self.profile,
+                bypass_cache=self.bypass_cache,
             )
 
             for event in stream_iter:

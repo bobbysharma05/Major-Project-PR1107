@@ -373,7 +373,7 @@ class MainWindow(QMainWindow):
         self.chat_view.add_user_message(user_msg.id, text, display_parts([a.part for a in attachments]))
         self._start_turn(conv_id)
 
-    def _start_turn(self, conv_id: str) -> None:
+    def _start_turn(self, conv_id: str, bypass_cache: bool = False) -> None:
         """Build the request from stored history and hand it to the turn controller."""
         tools_to_pass = (
             self.engine.tool_registry.get_tool_specs()
@@ -401,6 +401,7 @@ class MainWindow(QMainWindow):
             pinned_model_id=pinned_model_id,
             pinned_endpoint_id=pinned_endpoint_id,
             profile=str(get_app_settings().value("router/profile", "")) or None,
+            bypass_cache=bypass_cache,
         )
 
     def _on_cost_added(self, cost: float) -> None:
@@ -426,7 +427,7 @@ class MainWindow(QMainWindow):
         # A failed turn left the user message unanswered: re-run it as-is.
         self.chat_view.clear()
         render_conversation(self.chat_view, self.storage.get_messages(conv_id))
-        self._start_turn(conv_id)
+        self._start_turn(conv_id, bypass_cache=True)
 
     def closeEvent(self, event: Any) -> None:
         """Stop and wait for background workers before the window goes away."""

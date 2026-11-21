@@ -143,6 +143,35 @@ def test_retry_replaces_last_reply_without_duplicating_user_message(window: Main
     assert [m.role for m in msgs] == ["user", "assistant"]
     assert msgs[-1].id != first_reply.id
 
+def test_retry_passes_bypass_cache(window: MainWindow, qapp: QApplication) -> None:
+    """Retry always asks the engine to skip the cache; normal sends do not."""
+    GATE.set()
+    window._on_send_message("question", [])
+    pump(qapp, lambda: idle(window))
+    first_reply = window.storage.get_messages(window.current_conversation_id)[-1]
+
+    captured: List[bool] = []
+
+    def fake_start(
+        request: ChatRequest,
+        conversation_id: str,
+        strategy_name: str,
+        pinned_model_id: Optional[str] = None,
+        pinned_endpoint_id: Optional[str] = None,
+        profile: Optional[str] = None,
+        bypass_cache: bool = False,
+    ) -> bool:
+        captured.append(bypass_cache)
+        return True
+
+    window.turns.start = fake_start  # type: ignore[method-assign]
+    window._on_regenerate(first_reply.id)
+    assert captured == [True]
+
+    window._on_send_message("another question", [])
+    assert captured == [True, False]
+
+
 def test_attachments_load_and_send_without_crashing(window: MainWindow, qapp: QApplication, tmp_path: Path) -> None:
     txt = tmp_path / "notes.txt"
     txt.write_text("remember the milk", encoding="utf-8")

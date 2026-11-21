@@ -67,6 +67,7 @@ class TurnController(QObject):
         pinned_model_id: Optional[str] = None,
         pinned_endpoint_id: Optional[str] = None,
         profile: Optional[str] = None,
+        bypass_cache: bool = False,
     ) -> bool:
         """Start a turn. Returns False (and does nothing) if one is already running."""
         if self._turn is not None:
@@ -81,6 +82,7 @@ class TurnController(QObject):
             pinned_endpoint_id=pinned_endpoint_id,
             conversation_id=conversation_id,
             profile=profile,
+            bypass_cache=bypass_cache,
         )
         turn = _Turn(worker=worker, conversation_id=conversation_id, msg_id=str(uuid.uuid4()))
         self._turn = turn

@@ -21,6 +21,27 @@ const STRATEGY_LABELS = {
   manual: 'Manual',
 };
 
+/**
+ * Footer badge for a response-cache hit. Rendered exactly like a SOURCE_BADGE.
+ * Exact hits read "cached"; semantic hits include their similarity.
+ */
+function cacheHitBadge(cache) {
+  if (!cache || cache.status !== 'hit') return '';
+  const label = cache.kind === 'semantic'
+    ? `cached (semantic ${fmtNum(cache.similarity, 2)})`
+    : 'cached';
+  return `<span class="badge badge-source" title="Answer served from the local response cache">${escapeHtml(label)}</span>`;
+}
+
+/**
+ * One-line cache summary for the Details panel: hit, miss, or not cacheable (reason).
+ */
+function cacheStatusText(cache) {
+  if (!cache || !cache.status) return 'not cacheable';
+  if (cache.status === 'hit' || cache.status === 'miss') return cache.status;
+  return cache.reason ? `not cacheable (${cache.reason})` : 'not cacheable';
+}
+
 function fmtNum(val, digits = 2) {
   return (val === null || val === undefined || isNaN(Number(val))) ? '-' : Number(val).toFixed(digits);
 }
@@ -49,6 +70,8 @@ function buildFooterItems(meta) {
   if (badge) {
     items.push(`<span class="badge ${badge[0]}" title="${escapeHtml(badge[2])}">${escapeHtml(badge[1])}</span>`);
   }
+  const cacheBadge = cacheHitBadge(routing.cache);
+  if (cacheBadge) items.push(cacheBadge);
   return items;
 }
 
@@ -216,6 +239,7 @@ function buildInsightsHtml(meta) {
   }
 
   const extra = [];
+  if (r.cache) extra.push(`Cache: ${cacheStatusText(r.cache)}`);
   if (r.stickiness_outcome) extra.push(`Stickiness: ${r.stickiness_outcome}`);
   if (r.profile) extra.push(`Profile: ${r.profile}`);
   if (Array.isArray(r.lacking_metric_models) && r.lacking_metric_models.length) {
@@ -250,7 +274,12 @@ function renderFinishedFooter(msgId, meta) {
   const items = buildFooterItems(meta);
 
   if (meta.latency_sec !== undefined) items.push(`<span>${fmtNum(meta.latency_sec)}s</span>`);
-  if (meta.cost_usd !== undefined && Number(meta.cost_usd) > 0) items.push(`<span>$${fmtNum(meta.cost_usd, 5)}</span>`);
+  const cacheHit = r.cache && r.cache.status === 'hit';
+  if (cacheHit) {
+    items.push('<span>$0</span>');
+  } else if (meta.cost_usd !== undefined && Number(meta.cost_usd) > 0) {
+    items.push(`<span>$${fmtNum(meta.cost_usd, 5)}</span>`);
+  }
   if (meta.tokens_in !== undefined && meta.tokens_out !== undefined) {
     items.push(`<span>${Number(meta.tokens_in) || 0} in / ${Number(meta.tokens_out) || 0} out</span>`);
   }

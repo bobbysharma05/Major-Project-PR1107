@@ -147,6 +147,27 @@ def test_chat_worker_execution(qapp, tmp_path: Path) -> None:
     assert "finished" in types
 
 
+def test_chat_worker_forwards_bypass_cache(qapp) -> None:
+    """ChatWorker passes bypass_cache through to the engine."""
+
+    class FakeEngine:
+        def __init__(self) -> None:
+            self.seen: list[bool] = []
+
+        def run_turn(self, **kwargs):  # type: ignore[no-untyped-def]
+            self.seen.append(kwargs.get("bypass_cache", False))
+            return iter([])
+
+    engine = FakeEngine()
+    worker = ChatWorker(
+        engine=engine,  # type: ignore[arg-type]
+        request=ChatRequest(messages=[Message.from_text("user", "q")]),
+        bypass_cache=True,
+    )
+    worker.run()
+    assert engine.seen == [True]
+
+
 def test_settings_dialog(qapp) -> None:
     reg = create_test_registry()
     dlg = SettingsDialog(registry=reg)

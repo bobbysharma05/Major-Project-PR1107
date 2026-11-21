@@ -12,6 +12,7 @@ import pytest
 
 import modelmesh.core.engine as engine_module
 from modelmesh.core.cache.config import CacheConfig
+from modelmesh.core.cache.keys import build_cache_key
 from modelmesh.core.engine import ChatEngine
 from modelmesh.core.providers.mock import MockAdapter
 from modelmesh.core.registry import ModelRegistry
@@ -113,10 +114,13 @@ def _request(text: str = "What is a hash map?") -> ChatRequest:
 
 
 def _collect(
-    chat: ChatEngine, request: ChatRequest, **kwargs: Any
+    chat: ChatEngine,
+    request: ChatRequest,
+    strategy_name: str = "cheapest_first",
+    **kwargs: Any,
 ) -> tuple[List[StreamEvent], Dict[str, Any], str]:
     """Run a turn and return its events, DONE data and replayed answer text."""
-    events = list(chat.run_turn(request=request, strategy_name="cheapest_first", **kwargs))
+    events = list(chat.run_turn(request=request, strategy_name=strategy_name, **kwargs))
     done = next(e for e in events if e.type == StreamEventType.DONE)
     text = "".join(e.text or "" for e in events if e.type == StreamEventType.TEXT_DELTA)
     return events, done.data, text
@@ -345,6 +349,39 @@ def test_hit_with_stale_endpoint_is_treated_as_miss(
     )
     _collect(chat, _request())
     assert len(calls) == 2
+
+
+def test_cache_hit_under_smart_clef_logs_hit_without_exception(
+    engine: ChatEngine, storage: Storage, calls: List[str]
+) -> None:
+    """A hit replay under Smart routing logs cache_status 'hit' and never raises."""
+    request = _request("smart cache question")
+    parts = build_cache_key(request, "", None)
+    storage.put_cache_entry(
+        key=parts.key,
+        norm_prompt=parts.norm_prompt,
+        context_hash=parts.context_hash,
+        system_hash=parts.system_hash,
+        params_hash=parts.params_hash,
+        scope=parts.scope,
+        answer_text="cached smart answer",
+        ttl_seconds=3600,
+        model_id="mock-cheap",
+        endpoint_id="mock-cheap@mock",
+        provider_id="mock",
+        tokens_in=11,
+        tokens_out=7,
+        cost_usd=0.0002,
+        max_entries=100,
+    )
+
+    events, done, text = _collect(engine, request, strategy_name="smart_clef")
+    assert calls == []  # a hit never calls a provider
+    assert text == "cached smart answer"
+    assert done["cost_usd"] == 0.0
+    assert done["metadata"]["cache"]["status"] == "hit"
+    assert _statuses(storage) == ["hit"]
+    assert not any(e.type == StreamEventType.ERROR for e in events)
 
 
 def test_same_prompt_hits_when_mocked_base_date_changes(

@@ -155,7 +155,7 @@ class ChatEngine:
         cache_system_prompt = "\n\n".join(p for p in prompt_parts[1:] if p)
         cache_key_parts: Optional[CacheKeyParts] = None
         cache_hit = False
-        cacheable, _cache_reason = is_cacheable_request(current_request)
+        cacheable, cache_reason = is_cacheable_request(current_request)
         cache_entry: Optional[Dict[str, Any]] = None
         cached_candidate: Optional[Candidate] = None
 
@@ -256,6 +256,10 @@ class ChatEngine:
                 )
             except Exception as exc:
                 logger.warning("Cache hit routing log failed: %s", exc)
+            try:
+                self.storage.touch_cache_entry(cache_key_parts.key)
+            except Exception as exc:
+                logger.warning("Cache touch failed: %s", exc)
             yield StreamEvent(type=StreamEventType.USAGE, usage=replay_usage)
             yield StreamEvent(
                 type=StreamEventType.DONE,
@@ -272,10 +276,6 @@ class ChatEngine:
                     "ttft_sec": 0.0,
                 },
             )
-            try:
-                self.storage.touch_cache_entry(cache_key_parts.key)
-            except Exception as exc:
-                logger.warning("Cache touch failed: %s", exc)
             return
 
         if candidate is not None:
@@ -641,7 +641,13 @@ class ChatEngine:
                 logger.warning("Response cache store failed: %s", exc)
 
         done_metadata = routing_metadata(decision, successful_candidate) if decision else {}
-        if cacheable:
+        if not self.cache_config.enabled:
+            done_metadata["cache"] = {"status": "not_cacheable", "reason": "cache_disabled"}
+        elif self.storage is None:
+            done_metadata["cache"] = {"status": "not_cacheable", "reason": "no_storage"}
+        elif not cacheable:
+            done_metadata["cache"] = {"status": "not_cacheable", "reason": cache_reason}
+        else:
             done_metadata["cache"] = {"status": "miss"}
 
         yield StreamEvent(

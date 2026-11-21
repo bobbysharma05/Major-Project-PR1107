@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -111,3 +112,84 @@ def test_code_is_highlighted_once_reply_finishes(view: ChatView) -> None:
     view.finish_assistant_message("h1", {"model_id": "m"})
     _wait(300)
     assert _eval(view, "document.querySelectorAll('#content-h1 code[data-highlighted]').length") == 1
+
+
+def test_cache_hit_shows_cached_badge_and_zero_cost(view: ChatView) -> None:
+    """An exact hit shows the cached badge and a zero cost in the footer."""
+    meta = {
+        "strategy": "cheapest_first",
+        "cache": {"status": "hit", "kind": "exact", "similarity": 1.0},
+    }
+    view.start_assistant_message("c1", "m", "p", "cheapest_first", "Served from response cache", meta)
+    view.append_token("c1", "cached answer")
+    view.finish_assistant_message("c1", {
+        "model_id": "m", "provider_id": "p", "strategy": "cheapest_first",
+        "metadata": meta, "cost_usd": 0.0, "tokens_in": 10, "tokens_out": 4,
+    })
+    _wait(300)
+
+    footer = _eval(view, "document.getElementById('meta-c1').innerText")
+    assert "cached" in footer
+    assert "$0" in footer
+
+
+def test_semantic_cache_hit_shows_similarity_in_badge(view: ChatView) -> None:
+    """A semantic hit includes its similarity in the cached badge text."""
+    meta = {
+        "strategy": "cheapest_first",
+        "cache": {"status": "hit", "kind": "semantic", "similarity": 0.94},
+    }
+    view.start_assistant_message("c2", "m", "p", "cheapest_first", "Served from response cache", meta)
+    view.finish_assistant_message("c2", {"model_id": "m", "metadata": meta, "cost_usd": 0.0})
+    _wait(300)
+
+    footer = _eval(view, "document.getElementById('meta-c2').innerText")
+    assert "cached (semantic 0.94)" in footer
+
+
+def test_cache_miss_shows_no_cached_badge(view: ChatView) -> None:
+    """A miss renders the normal cost and no cached badge."""
+    meta = {"strategy": "cheapest_first", "cache": {"status": "miss"}}
+    view.start_assistant_message("c3", "m", "p", "cheapest_first", "r", meta)
+    view.finish_assistant_message("c3", {"model_id": "m", "metadata": meta, "cost_usd": 0.001})
+    _wait(300)
+
+    footer = _eval(view, "document.getElementById('meta-c3').innerText")
+    assert "cached" not in footer
+    assert "$0.00100" in footer
+
+
+def test_cache_badge_restored_from_saved_conversation(view: ChatView, tmp_path: Path) -> None:
+    """The cached badge and Details line survive a reload from storage."""
+    from modelmesh.core.storage import Storage
+    from modelmesh.core.types import Message
+    from modelmesh.ui.transcript import render_conversation
+
+    storage = Storage(tmp_path / "restore.db")
+    conv = "restore-conv"
+    storage.create_conversation(conv_id=conv)
+    user = Message.from_text("user", "question")
+    user.created_at = 1000.0
+    assistant = Message.from_text("assistant", "answer")
+    assistant.created_at = 1001.0
+    assistant.meta = {
+        "strategy": "smart_clef",
+        "reason": "Served from response cache",
+        "routing": {
+            "strategy": "smart_clef",
+            "need": 0.5,
+            "task": "chat_general",
+            "cache": {"status": "hit", "kind": "exact", "similarity": 1.0},
+        },
+    }
+    storage.save_message(user, conversation_id=conv)
+    storage.save_message(assistant, conversation_id=conv, cost=0.0, status="complete")
+
+    render_conversation(view, storage.get_messages(conv))
+    _wait(300)
+
+    footer = _eval(view, f"document.getElementById('meta-{assistant.id}').innerText")
+    assert "cached" in footer
+    assert "$0" in footer
+    details = _eval(view, f"document.getElementById('insights-{assistant.id}').textContent")
+    assert "Cache: hit" in details
