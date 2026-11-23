@@ -57,6 +57,14 @@ class ChatEngine:
                 logger.warning("Cache configuration unavailable: %s. Using defaults.", exc)
                 self.cache_config = CacheConfig()
 
+    def reload_cache_config(self) -> None:
+        """Re-read ``config/cache.yaml`` (used by Settings after an edit)."""
+        try:
+            self.cache_config = load_cache_config()
+        except Exception as exc:
+            logger.warning("Cache configuration reload failed: %s. Using defaults.", exc)
+            self.cache_config = CacheConfig()
+
     def _health_tracker(self) -> Optional[Any]:
         """Return the router's endpoint health tracker, if any."""
         return getattr(self.router, "health_tracker", None) if self.router is not None else None
@@ -597,7 +605,19 @@ class ChatEngine:
             price_out_per_mtok=successful_candidate.price_out_per_mtok,
         )
 
+        if not self.cache_config.enabled:
+            cache_meta: Dict[str, Any] = {"status": "not_cacheable", "reason": "cache_disabled"}
+        elif self.storage is None:
+            cache_meta = {"status": "not_cacheable", "reason": "no_storage"}
+        elif not cacheable:
+            cache_meta = {"status": "not_cacheable", "reason": cache_reason}
+        else:
+            cache_meta = {"status": "miss"}
+
         if self.storage is not None and decision is not None:
+            # Record the terminal cache status in the routing log's features so
+            # cache_metrics() can distinguish hit/miss from non-cacheable turns.
+            decision.request_features["cache"] = cache_meta
             record_turn(
                 self.storage,
                 decision,
@@ -607,6 +627,7 @@ class ChatEngine:
                 latency_ms=int(total_latency * 1000),
                 ttft_ms=int((time_to_first_token or 0) * 1000),
                 conversation_id=conversation_id,
+                cache_status=cache_meta["status"],
             )
 
         if (
@@ -641,14 +662,7 @@ class ChatEngine:
                 logger.warning("Response cache store failed: %s", exc)
 
         done_metadata = routing_metadata(decision, successful_candidate) if decision else {}
-        if not self.cache_config.enabled:
-            done_metadata["cache"] = {"status": "not_cacheable", "reason": "cache_disabled"}
-        elif self.storage is None:
-            done_metadata["cache"] = {"status": "not_cacheable", "reason": "no_storage"}
-        elif not cacheable:
-            done_metadata["cache"] = {"status": "not_cacheable", "reason": cache_reason}
-        else:
-            done_metadata["cache"] = {"status": "miss"}
+        done_metadata["cache"] = cache_meta
 
         yield StreamEvent(
             type=StreamEventType.USAGE,

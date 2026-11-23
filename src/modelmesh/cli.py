@@ -6,7 +6,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 # Ensure src is in sys.path when script is run directly
 _src_dir = str(Path(__file__).resolve().parent.parent)
@@ -118,7 +118,40 @@ def handle_scores_command(args: argparse.Namespace, storage: Storage) -> int:
     return 0
 
 
+def _run_cache_command(argv: List[str]) -> int:
+    """Handle ``modelmesh-cli cache stats|clear|purge`` against the response cache.
+
+    Args:
+        argv: Arguments after the ``cache`` token (e.g. ``["stats"]``).
+
+    Returns:
+        Process exit code: 0 on success, 1 on an unknown or missing command.
+    """
+    storage = Storage()
+    if not argv:
+        print("Usage: modelmesh-cli cache <stats|clear|purge>")
+        return 1
+    cmd = argv[0]
+    if cmd == "stats":
+        print(json.dumps(storage.cache_metrics(), indent=2, sort_keys=True))
+        return 0
+    if cmd == "clear":
+        removed = storage.clear_response_cache()
+        print(f"Cleared response cache: {removed} entries")
+        return 0
+    if cmd == "purge":
+        removed = storage.purge_expired_cache()
+        print(f"Purged expired response-cache entries: {removed}")
+        return 0
+    print(f"Unknown cache command: {cmd}")
+    return 1
+
+
 def main() -> int:
+    # Check if cache subcommand is invoked
+    if len(sys.argv) > 1 and sys.argv[1] == "cache":
+        return _run_cache_command(sys.argv[2:])
+
     # Check if scores subcommand is invoked
     if len(sys.argv) > 1 and sys.argv[1] == "scores":
         scores_parser = argparse.ArgumentParser(
@@ -150,6 +183,11 @@ def main() -> int:
     parser.add_argument("--endpoint", type=str, default=None, help="Specific target endpoint ID (manual mode)")
     parser.add_argument("--config", type=str, default=None, help="Path to custom providers.yaml or config dir")
     parser.add_argument("--env-file", type=str, default=None, help="Path to .env secrets file")
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Skip the response cache: always route and call a provider.",
+    )
 
     args = parser.parse_args()
 
@@ -158,6 +196,7 @@ def main() -> int:
     load_env(env_path)
 
     storage = Storage()
+    storage.purge_expired_cache()
     prompt_text = args.prompt
     config_dir = Path(args.config) if args.config else None
     registry = load_default_registry(config_dir)
@@ -196,6 +235,7 @@ def main() -> int:
             strategy_name=strat_label,
             pinned_model_id=pinned_model,
             pinned_endpoint_id=pinned_endpoint,
+            bypass_cache=args.no_cache,
         )
 
         for ev in events:

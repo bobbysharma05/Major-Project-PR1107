@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Optional
 
 from PyQt6.QtCore import Qt
@@ -45,10 +46,12 @@ class UsageDialog(QDialog):
         self.reqs_label = QLabel("<strong>Requests:</strong> 0")
         self.tokens_label = QLabel("<strong>Total Tokens:</strong> 0")
         self.cost_label = QLabel("<strong>Est. Total Cost:</strong> $0.0000")
+        self.hits_label = QLabel("<strong>Cache Hits:</strong> 0 · <strong>Saved Cost:</strong> $0.0000")
 
         summary_layout.addWidget(self.reqs_label)
         summary_layout.addWidget(self.tokens_label)
         summary_layout.addWidget(self.cost_label)
+        summary_layout.addWidget(self.hits_label)
         layout.addWidget(summary_card)
 
         # Usage Table
@@ -83,13 +86,23 @@ class UsageDialog(QDialog):
     def refresh(self) -> None:
         """Fetch latest routing logs and populate table."""
         logs = self.storage.get_routing_logs(limit=100)
-        self.table.setRowCount(len(logs))
+        self.table.setRowCount(0)
 
-        total_reqs = len(logs)
+        total_reqs = 0
         total_toks = 0
         total_cost = 0.0
+        total_hits = 0
+        total_saved = 0.0
 
-        for row, entry in enumerate(logs):
+        for entry in logs:
+            if entry.get("cache_status") == "hit":
+                # Cache hits carry the saved tokens/cost, not real spend; they
+                # are excluded from the real totals and summarised separately.
+                total_hits += 1
+                block = self._cache_block(entry)
+                total_saved += float(block.get("saved_cost_usd") or 0.0)
+                continue
+            total_reqs += 1
             tin = entry.get("tokens_in") or 0
             tout = entry.get("tokens_out") or 0
             # Column names as stored in routing_log
@@ -99,6 +112,8 @@ class UsageDialog(QDialog):
             total_toks += tin + tout
             total_cost += cost
 
+            row = self.table.rowCount()
+            self.table.insertRow(row)
             self.table.setItem(row, 0, QTableWidgetItem(entry.get("chosen_model_id") or "-"))
             self.table.setItem(row, 1, QTableWidgetItem(entry.get("chosen_endpoint_id") or "-"))
             self.table.setItem(row, 2, QTableWidgetItem(entry.get("provider_id") or "-"))
@@ -110,3 +125,19 @@ class UsageDialog(QDialog):
         self.reqs_label.setText(f"<strong>Requests:</strong> {total_reqs}")
         self.tokens_label.setText(f"<strong>Total Tokens:</strong> {total_toks:,}")
         self.cost_label.setText(f"<strong>Est. Total Cost:</strong> ${total_cost:.4f}")
+        self.hits_label.setText(
+            f"<strong>Cache Hits:</strong> {total_hits} · <strong>Saved Cost:</strong> ${total_saved:.4f}"
+        )
+
+    @staticmethod
+    def _cache_block(entry: Dict[str, Any]) -> Dict[str, Any]:
+        """Return the ``cache`` block from a routing_log row's features_json."""
+        features_json = entry.get("features_json")
+        if not features_json:
+            return {}
+        try:
+            parsed = json.loads(features_json)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        block = parsed.get("cache") if isinstance(parsed, dict) else None
+        return block if isinstance(block, dict) else {}

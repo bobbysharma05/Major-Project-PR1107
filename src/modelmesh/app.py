@@ -51,6 +51,7 @@ def main() -> None:
     registry = load_default_registry()
     db_path = get_db_path()
     storage = Storage(db_path=db_path)
+    storage.purge_expired_cache()
     router = Router(registry=registry, storage=storage)
 
     # Load persisted workspace folder

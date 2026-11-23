@@ -171,7 +171,7 @@ def test_chat_worker_forwards_bypass_cache(qapp) -> None:
 def test_settings_dialog(qapp) -> None:
     reg = create_test_registry()
     dlg = SettingsDialog(registry=reg)
-    assert dlg.tabs.count() == 5  # Providers, Endpoints, Scores, Routing, Appearance
+    assert dlg.tabs.count() == 6  # Providers, Endpoints, Scores, Routing, Appearance, Cache
     assert dlg.providers_tab.provider_list.count() >= 1
     assert dlg.models_tab.table.rowCount() >= 1
     assert dlg.models_tab.table.columnCount() == 8

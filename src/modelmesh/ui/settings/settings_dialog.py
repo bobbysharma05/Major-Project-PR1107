@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
 
 from modelmesh.core.registry import ModelRegistry
 from modelmesh.ui.settings.appearance_tab import AppearanceTab
+from modelmesh.ui.settings.cache_tab import CacheTab
 from modelmesh.ui.settings.models_tab import ModelsTab
 from modelmesh.ui.settings.providers_tab import ProvidersTab
 from modelmesh.ui.settings.routing_tab import RoutingTab
@@ -34,6 +35,7 @@ class SettingsDialog(QDialog):
         tool_registry: Optional[Any] = None,
         skill_loader: Optional[Any] = None,
         parent: Optional[QWidget] = None,
+        engine: Optional[Any] = None,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("settingsDialog")
@@ -74,6 +76,10 @@ class SettingsDialog(QDialog):
         self.appearance_tab = AppearanceTab(parent=self)
         self.appearance_tab.theme_changed.connect(self.theme_changed)
         self.tabs.addTab(self.appearance_tab, "Appearance")
+
+        # 6. Cache Tab
+        self.cache_tab = CacheTab(storage=self.storage, engine=engine, parent=self)
+        self.tabs.addTab(self.cache_tab, "Cache")
 
         layout.addWidget(self.tabs)
 

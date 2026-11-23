@@ -980,6 +980,90 @@ class Storage:
                 ).fetchone()
         return dict(row) if row else {"entries": 0, "total_hits": 0, "expired_entries": 0}
 
+    def cache_metrics(self, since: Optional[float] = None) -> Dict[str, Any]:
+        """Aggregate response-cache observability metrics from the routing log.
+
+        Classifies each routing_log row by ``cache_status``: hit rows carry the
+        *saved* tokens/cost (real spend on them is zero), miss rows are
+        cacheable turns that were not served from the cache, and
+        ``not_cacheable`` rows never entered the cache (refused requests).
+
+        Args:
+            since: Only count rows created after this Unix timestamp.
+
+        Returns:
+            A plain ``dict`` with keys: ``total_cacheable_turns``, ``hits``,
+            ``misses``, ``hit_rate``, ``exact_hits``, ``semantic_hits``,
+            ``saved_cost_usd``, ``saved_tokens_in``, ``saved_tokens_out``,
+            ``avg_hit_latency_ms``, ``avg_miss_latency_ms``.
+        """
+        with self._lock:
+            with self._get_connection() as conn:
+                if since is None:
+                    rows = conn.execute(
+                        """
+                        SELECT cache_status, total_latency_ms, tokens_in, tokens_out, features_json
+                        FROM routing_log
+                        """
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """
+                        SELECT cache_status, total_latency_ms, tokens_in, tokens_out, features_json
+                        FROM routing_log
+                        WHERE created_at >= ?
+                        """,
+                        (since,),
+                    ).fetchall()
+
+        hits = misses = exact = semantic = 0
+        saved_cost = saved_in = saved_out = 0
+        hit_lat_sum = miss_lat_sum = 0
+        for row in rows:
+            status, block = self._cache_status_of(row)
+            latency = int(row["total_latency_ms"] or 0)
+            if status == "hit":
+                hits += 1
+                hit_lat_sum += latency
+                saved_cost += float(block.get("saved_cost_usd") or 0.0)
+                saved_in += int(row["tokens_in"] or 0)
+                saved_out += int(row["tokens_out"] or 0)
+                if block.get("kind") == "semantic":
+                    semantic += 1
+                else:
+                    exact += 1
+            elif status == "miss":
+                misses += 1
+                miss_lat_sum += latency
+        total = hits + misses
+        return {
+            "total_cacheable_turns": total,
+            "hits": hits,
+            "misses": misses,
+            "hit_rate": (hits / total) if total else 0.0,
+            "exact_hits": exact,
+            "semantic_hits": semantic,
+            "saved_cost_usd": saved_cost,
+            "saved_tokens_in": saved_in,
+            "saved_tokens_out": saved_out,
+            "avg_hit_latency_ms": (hit_lat_sum / hits) if hits else 0.0,
+            "avg_miss_latency_ms": (miss_lat_sum / misses) if misses else 0.0,
+        }
+
+    @staticmethod
+    def _cache_status_of(row: Any) -> tuple[str, Dict[str, Any]]:
+        """Return ``(status, cache_block)`` for a routing_log row."""
+        block: Dict[str, Any] = {}
+        features_json = row["features_json"]
+        if features_json:
+            try:
+                parsed = json.loads(features_json)
+                if isinstance(parsed, dict) and isinstance(parsed.get("cache"), dict):
+                    block = parsed["cache"]
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return row["cache_status"] or "miss", block
+
     def get_usage_summary(self) -> Dict[str, Any]:
         """Aggregate usage metrics by model, provider/endpoint, and overall total."""
         with self._lock:

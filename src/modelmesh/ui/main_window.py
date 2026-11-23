@@ -479,6 +479,7 @@ class MainWindow(QMainWindow):
             tool_registry=self.engine.tool_registry,
             skill_loader=self.engine.skill_loader,
             parent=self,
+            engine=self.engine,
         )
         if tab_index > 0:
             dlg.tabs.setCurrentIndex(tab_index)
