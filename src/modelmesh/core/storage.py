@@ -802,6 +802,54 @@ class Storage:
             return None  # expired — do not expose stale data
         return d
 
+    def get_semantic_candidates(
+        self,
+        context_hash: str,
+        system_hash: str,
+        params_hash: str,
+        scope: str,
+        limit: int = 500,
+        now: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return recent non-expired cache rows eligible for semantic matching.
+
+        Only rows that share the same conversation context, system prompt,
+        generation parameters, and model scope are considered, and only rows
+        that actually carry an embedding (entries written while semantic
+        matching was disabled are exact-only).
+
+        Args:
+            context_hash: SHA-256 of the conversation context before the prompt.
+            system_hash: SHA-256 of the effective system prompt.
+            params_hash: SHA-256 of the generation parameters.
+            scope: Pinned endpoint/model id or the literal ``"auto"``.
+            limit: Maximum number of most-recent rows to return.
+            now: Unix timestamp to use as "current time" (injected in tests).
+
+        Returns:
+            Plain dicts of the matching rows, newest first, including the raw
+            ``embedding`` BLOB.
+        """
+        ts = now if now is not None else time.time()
+        safe_limit = max(1, int(limit))
+        with self._lock:
+            with self._get_connection() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM response_cache
+                    WHERE context_hash = ?
+                      AND system_hash = ?
+                      AND params_hash = ?
+                      AND scope = ?
+                      AND embedding IS NOT NULL
+                      AND ? <= created_at + ttl_seconds
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (context_hash, system_hash, params_hash, scope, ts, safe_limit),
+                ).fetchall()
+        return [dict(row) for row in rows]
+
     def put_cache_entry(
         self,
         key: str,

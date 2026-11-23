@@ -89,7 +89,8 @@ def test_cache_tab_persists_settings_and_reloads_stats(
     tab = CacheTab(storage=storage)
 
     assert tab.enabled_cb.isChecked() is True
-    assert tab.semantic_cb.isEnabled() is False
+    assert tab.semantic_cb.isEnabled() is True
+    assert tab.semantic_cb.isChecked() is False
     assert "Turns: 0" in tab.stats_label.text()
 
     tab.enabled_cb.setChecked(False)
@@ -101,6 +102,29 @@ def test_cache_tab_persists_settings_and_reloads_stats(
     assert cfg.ttl_seconds == 48 * 3600
 
     assert "Turns: 0" in tab.stats_label.text()
+
+
+def test_cache_tab_saves_semantic_settings(
+    qapp: Any, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The semantic toggle, threshold, and embedder choice persist to cache.yaml."""
+    _patch_cache_path(monkeypatch, tmp_path)
+    storage = Storage(db_path=tmp_path / "semantic.db")
+    tab = CacheTab(storage=storage)
+
+    tab.semantic_cb.setChecked(True)
+    tab.threshold_spin.setValue(0.81)
+    index = tab.embedder_combo.findData("sentence_transformers")
+    assert index >= 0
+    tab.embedder_combo.setCurrentIndex(index)
+    tab.save()
+
+    cfg = load_cache_config()
+    assert cfg.semantic.enabled is True
+    assert cfg.semantic.threshold == pytest.approx(0.81)
+    assert cfg.semantic.embedder == "sentence_transformers"
+    assert cfg.semantic.hashing_dim == 512
+    assert cfg.semantic.max_candidates == 500
 
 
 def test_cache_tab_clear_deletes_entries(

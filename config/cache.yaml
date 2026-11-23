@@ -35,7 +35,9 @@ semantic:
   enabled: false
 
   # Cosine-similarity threshold above which a stored entry is considered a hit.
-  # Higher = more conservative (fewer false hits).
+  # Higher = more conservative (fewer false hits).  The dependency-free hashing
+  # embedder scores lower than neural models; ~0.70 is a practical starting
+  # point, while 0.92 only accepts near-identical wording.
   threshold: 0.92
 
   # Embedding backend to use.
@@ -45,3 +47,9 @@ semantic:
 
   # Model name used by the sentence_transformers backend (ignored for hashing).
   model_name: all-MiniLM-L6-v2
+
+  # Number of hash buckets used by the dependency-free hashing embedder.
+  hashing_dim: 512
+
+  # Most recent entries compared per semantic lookup (bounds CPU per turn).
+  max_candidates: 500

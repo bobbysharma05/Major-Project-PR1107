@@ -27,6 +27,8 @@ class SemanticCacheConfig(BaseModel):
     threshold: float = Field(default=0.92, ge=0.0, le=1.0)
     embedder: Literal["hashing", "sentence_transformers"] = "hashing"
     model_name: str = "all-MiniLM-L6-v2"
+    hashing_dim: int = Field(default=512, gt=0)
+    max_candidates: int = Field(default=500, gt=0)
 
     @field_validator("threshold")
     @classmethod

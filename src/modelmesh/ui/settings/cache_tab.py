@@ -6,6 +6,7 @@ from typing import Any, Optional
 
 from PyQt6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
@@ -17,7 +18,6 @@ from PyQt6.QtWidgets import (
 )
 
 from modelmesh.core.cache.config import (
-    CacheConfig,
     SemanticCacheConfig,
     load_cache_config,
     save_cache_config,
@@ -74,10 +74,11 @@ class CacheTab(QWidget):
         layout.addLayout(max_row)
 
         semantic_row = QHBoxLayout()
-        self.semantic_cb = QCheckBox("Semantic matching (planned; not yet implemented)")
-        self.semantic_cb.setEnabled(False)
+        self.semantic_cb = QCheckBox("Semantic matching (near-duplicate prompts)")
         self.semantic_cb.setChecked(cfg.semantic.enabled)
+        self.semantic_cb.toggled.connect(self.save)
         semantic_row.addWidget(self.semantic_cb)
+        semantic_row.addStretch()
         layout.addLayout(semantic_row)
 
         threshold_row = QHBoxLayout()
@@ -86,10 +87,33 @@ class CacheTab(QWidget):
         self.threshold_spin.setRange(0.0, 1.0)
         self.threshold_spin.setSingleStep(0.01)
         self.threshold_spin.setValue(cfg.semantic.threshold)
-        self.threshold_spin.setEnabled(False)
+        self.threshold_spin.valueChanged.connect(self.save)
         threshold_row.addWidget(self.threshold_spin)
         threshold_row.addStretch()
         layout.addLayout(threshold_row)
+
+        embedder_row = QHBoxLayout()
+        embedder_row.addWidget(QLabel("Embedder:"))
+        self.embedder_combo = QComboBox()
+        self.embedder_combo.addItem("Hashing (built-in, no dependencies)", "hashing")
+        self.embedder_combo.addItem(
+            "sentence-transformers (optional install)", "sentence_transformers"
+        )
+        index = self.embedder_combo.findData(cfg.semantic.embedder)
+        if index >= 0:
+            self.embedder_combo.setCurrentIndex(index)
+        self.embedder_combo.currentIndexChanged.connect(self.save)
+        embedder_row.addWidget(self.embedder_combo)
+        embedder_row.addStretch()
+        layout.addLayout(embedder_row)
+
+        layout.addWidget(
+            QLabel(
+                "Semantic matching compares only entries with the same context, "
+                "system prompt, parameters, and model scope. Numbers, negations, "
+                "and prompt length must also agree."
+            )
+        )
 
         self.stats_label = QLabel("No cache activity recorded yet.")
         layout.addWidget(self.stats_label)
@@ -109,14 +133,17 @@ class CacheTab(QWidget):
 
     def save(self) -> None:
         """Persist the current control values to cache.yaml and refresh the engine."""
-        cfg = CacheConfig(
-            enabled=self.enabled_cb.isChecked(),
-            ttl_seconds=self.ttl_spin.value() * 3600,
-            max_entries=self.max_entries_spin.value(),
-            semantic=SemanticCacheConfig(
-                enabled=False,  # not yet implemented
-                threshold=self.threshold_spin.value(),
-            ),
+        cfg = load_cache_config()
+        cfg.enabled = self.enabled_cb.isChecked()
+        cfg.ttl_seconds = self.ttl_spin.value() * 3600
+        cfg.max_entries = self.max_entries_spin.value()
+        cfg.semantic = SemanticCacheConfig(
+            enabled=self.semantic_cb.isChecked(),
+            threshold=self.threshold_spin.value(),
+            embedder=self.embedder_combo.currentData() or "hashing",
+            model_name=cfg.semantic.model_name,
+            hashing_dim=cfg.semantic.hashing_dim,
+            max_candidates=cfg.semantic.max_candidates,
         )
         save_cache_config(cfg)
         if self.engine is not None:
@@ -130,10 +157,12 @@ class CacheTab(QWidget):
             return
         metrics = self.storage.cache_metrics()
         self.stats_label.setText(
-            "Turns: {total} (hits {hits}, misses {misses} · hit rate {rate:.0f}%) "
-            "· Saved: ${saved:.4f}".format(
+            "Turns: {total} (hits {hits}: exact {exact}, semantic {semantic}; "
+            "misses {misses} · hit rate {rate:.0f}%) · Saved: ${saved:.4f}".format(
                 total=metrics["total_cacheable_turns"],
                 hits=metrics["hits"],
+                exact=metrics["exact_hits"],
+                semantic=metrics["semantic_hits"],
                 misses=metrics["misses"],
                 rate=metrics["hit_rate"] * 100,
                 saved=metrics["saved_cost_usd"],

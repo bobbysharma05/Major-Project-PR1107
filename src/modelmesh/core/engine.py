@@ -6,6 +6,14 @@ import time
 from typing import Any, Dict, Iterator, List, Optional
 
 from modelmesh.core.cache.config import CacheConfig, load_cache_config
+from modelmesh.core.cache.embedding import (
+    Embedder,
+    cosine_similarity,
+    create_embedder,
+    pack_embedding,
+    semantic_gate,
+    unpack_embedding,
+)
 from modelmesh.core.cache.keys import CacheKeyParts, build_cache_key, is_cacheable_request
 from modelmesh.core.cost import calculate_cost, estimate_request_tokens
 from modelmesh.core.errors import ProviderError, RoutingError
@@ -56,6 +64,8 @@ class ChatEngine:
             except Exception as exc:  # Cache must never prevent a chat turn.
                 logger.warning("Cache configuration unavailable: %s. Using defaults.", exc)
                 self.cache_config = CacheConfig()
+        self._embedder: Optional[Embedder] = None
+        self._embedder_key: Optional[tuple[str, int, str]] = None
 
     def reload_cache_config(self) -> None:
         """Re-read ``config/cache.yaml`` (used by Settings after an edit)."""
@@ -64,6 +74,8 @@ class ChatEngine:
         except Exception as exc:
             logger.warning("Cache configuration reload failed: %s. Using defaults.", exc)
             self.cache_config = CacheConfig()
+        self._embedder = None
+        self._embedder_key = None
 
     def _health_tracker(self) -> Optional[Any]:
         """Return the router's endpoint health tracker, if any."""
@@ -83,6 +95,108 @@ class ChatEngine:
             return self.storage.get_last_routed_model(conversation_id)
         except Exception:
             return None
+
+    def _semantic_embedder(self) -> Optional[Embedder]:
+        """Return the embedder for the current semantic config (cached).
+
+        Failures are logged and yield ``None`` so the turn falls back to
+        exact-only matching instead of breaking.
+        """
+        cfg = self.cache_config.semantic
+        key = (cfg.embedder, cfg.hashing_dim, cfg.model_name)
+        if self._embedder is not None and self._embedder_key == key:
+            return self._embedder
+        try:
+            self._embedder = create_embedder(cfg)
+            self._embedder_key = key
+            return self._embedder
+        except Exception as exc:  # Never let an optional backend break a turn.
+            logger.warning("Semantic embedder unavailable: %s. Exact matching only.", exc)
+            self._embedder = None
+            self._embedder_key = None
+            return None
+
+    def _candidate_for_cache_entry(self, entry: Dict[str, Any]) -> Optional[Candidate]:
+        """Resolve a stored cache row back to a live registry candidate."""
+        stored_endpoint = entry.get("endpoint_id")
+        if stored_endpoint:
+            candidate = self.registry.get_candidate(stored_endpoint)
+            if candidate is not None:
+                return candidate
+        stored_model = entry.get("model_id")
+        if stored_model:
+            return next(
+                (c for c in self.registry.candidates() if c.model_id == stored_model),
+                None,
+            )
+        return None
+
+    def _semantic_lookup(
+        self, parts: CacheKeyParts
+    ) -> tuple[Optional[Dict[str, Any]], Optional[Candidate], float, Optional[Dict[str, Any]]]:
+        """Find the best semantically similar cache entry for *parts*.
+
+        Candidates are restricted to entries sharing the same context, system
+        prompt, generation parameters, and scope.  A candidate is accepted only
+        when the cosine score clears the threshold and the numeric/negation/
+        length gates agree.
+
+        Returns:
+            ``(entry, candidate, similarity, near_miss)``.  On a miss the first
+            two values are ``None`` and ``near_miss`` describes the best
+            rejected candidate (for threshold tuning), if any.
+        """
+        if self.storage is None:
+            return None, None, 0.0, None
+        embedder = self._semantic_embedder()
+        if embedder is None:
+            return None, None, 0.0, None
+
+        cfg = self.cache_config.semantic
+        query = embedder.embed(parts.norm_prompt)
+        rows = self.storage.get_semantic_candidates(
+            context_hash=parts.context_hash,
+            system_hash=parts.system_hash,
+            params_hash=parts.params_hash,
+            scope=parts.scope,
+            limit=cfg.max_candidates,
+        )
+
+        best_row: Optional[Dict[str, Any]] = None
+        best_similarity = -1.0
+        for row in rows:
+            try:
+                vector = unpack_embedding(row.get("embedding") or b"")
+            except Exception as exc:
+                logger.warning("Skipping unreadable cache embedding: %s", exc)
+                continue
+            similarity = cosine_similarity(query, vector)
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_row = row
+
+        if best_row is None:
+            return None, None, 0.0, None
+
+        accepted, reason = semantic_gate(
+            parts.norm_prompt,
+            str(best_row.get("norm_prompt") or ""),
+            best_similarity,
+            cfg.threshold,
+        )
+        if accepted:
+            candidate = self._candidate_for_cache_entry(best_row)
+            if candidate is not None:
+                return best_row, candidate, best_similarity, None
+            reason = "stale_candidate"
+
+        near_miss = {
+            "similarity": round(best_similarity, 6),
+            "reason": reason,
+            "prompt": str(best_row.get("norm_prompt") or "")[:200],
+            "threshold": cfg.threshold,
+        }
+        return None, None, best_similarity, near_miss
 
     def run_turn(
         self,
@@ -163,6 +277,9 @@ class ChatEngine:
         cache_system_prompt = "\n\n".join(p for p in prompt_parts[1:] if p)
         cache_key_parts: Optional[CacheKeyParts] = None
         cache_hit = False
+        cache_hit_kind = "exact"
+        cache_similarity = 1.0
+        near_miss: Optional[Dict[str, Any]] = None
         cacheable, cache_reason = is_cacheable_request(current_request)
         cache_entry: Optional[Dict[str, Any]] = None
         cached_candidate: Optional[Candidate] = None
@@ -178,27 +295,27 @@ class ChatEngine:
                     current_request, cache_system_prompt, cache_scope
                 )
                 if not bypass_cache:
+                    # Exact match first; only then spend CPU on embeddings.
                     cache_entry = self.storage.get_cache_entry(cache_key_parts.key)
                     if cache_entry is not None:
-                        stored_endpoint = cache_entry.get("endpoint_id")
-                        if stored_endpoint:
-                            cached_candidate = self.registry.get_candidate(stored_endpoint)
+                        cached_candidate = self._candidate_for_cache_entry(cache_entry)
                         if cached_candidate is None:
-                            stored_model = cache_entry.get("model_id")
-                            if stored_model:
-                                cached_candidate = next(
-                                    (
-                                        c
-                                        for c in self.registry.candidates()
-                                        if c.model_id == stored_model
-                                    ),
-                                    None,
-                                )
+                            cache_entry = None
+                    if cache_entry is None and self.cache_config.semantic.enabled:
+                        (
+                            cache_entry,
+                            cached_candidate,
+                            cache_similarity,
+                            near_miss,
+                        ) = self._semantic_lookup(cache_key_parts)
+                        if cache_entry is not None:
+                            cache_hit_kind = "semantic"
             except Exception as exc:
                 logger.warning("Response cache lookup failed: %s", exc)
                 cache_key_parts = None
                 cache_entry = None
                 cached_candidate = None
+                near_miss = None
 
         if (
             cache_entry is not None
@@ -212,8 +329,8 @@ class ChatEngine:
             saved_out = int(cache_entry.get("tokens_out") or 0)
             cache_block: Dict[str, Any] = {
                 "status": "hit",
-                "kind": "exact",
-                "similarity": 1.0,
+                "kind": cache_hit_kind,
+                "similarity": round(cache_similarity, 6),
                 "saved_cost_usd": saved_cost,
                 "saved_tokens_in": saved_in,
                 "saved_tokens_out": saved_out,
@@ -613,6 +730,8 @@ class ChatEngine:
             cache_meta = {"status": "not_cacheable", "reason": cache_reason}
         else:
             cache_meta = {"status": "miss"}
+            if near_miss is not None:
+                cache_meta["near_miss"] = near_miss
 
         if self.storage is not None and decision is not None:
             # Record the terminal cache status in the routing log's features so
@@ -640,6 +759,16 @@ class ChatEngine:
             <= len(accumulated_turn_text)
             <= self.cache_config.max_answer_chars
         ):
+            embedding_bytes: Optional[bytes] = None
+            if self.cache_config.semantic.enabled:
+                embedder = self._semantic_embedder()
+                if embedder is not None:
+                    try:
+                        embedding_bytes = pack_embedding(
+                            embedder.embed(cache_key_parts.norm_prompt)
+                        )
+                    except Exception as exc:
+                        logger.warning("Response cache embedding failed: %s", exc)
             try:
                 self.storage.put_cache_entry(
                     key=cache_key_parts.key,
@@ -656,6 +785,7 @@ class ChatEngine:
                     tokens_in=final_usage.input_tokens,
                     tokens_out=final_usage.output_tokens,
                     cost_usd=cost_usd,
+                    embedding=embedding_bytes,
                     max_entries=self.cache_config.max_entries,
                 )
             except Exception as exc:
