@@ -26,6 +26,7 @@ dependencies = [
 [project.scripts]
 modelmesh = "modelmesh.app:main"
 modelmesh-cli = "modelmesh.cli:main"
+modelmesh-gateway = "modelmesh.gateway.server:main"
 
 [project.optional-dependencies]
 dev = [
@@ -35,6 +36,10 @@ dev = [
 ]
 semantic = [
     "sentence-transformers",
+]
+gateway = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
 ]
 
 [tool.pytest.ini_options]
