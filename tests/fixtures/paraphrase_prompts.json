@@ -1,0 +1,182 @@
+[
+  {
+    "id": "para-01",
+    "prompt": "Hi there! How is your day going?",
+    "source_id": "golden-01",
+    "same_meaning": true
+  },
+  {
+    "id": "para-02",
+    "prompt": "Which city serves as the capital of France?",
+    "source_id": "golden-02",
+    "same_meaning": true
+  },
+  {
+    "id": "para-03",
+    "prompt": "What is 100 degrees Fahrenheit in Celsius?",
+    "source_id": "golden-03",
+    "same_meaning": true
+  },
+  {
+    "id": "para-04",
+    "prompt": "Suggest another word that means 'fast'.",
+    "source_id": "golden-04",
+    "same_meaning": true
+  },
+  {
+    "id": "para-05",
+    "prompt": "How do you say 'Good morning, friend' in Spanish?",
+    "source_id": "golden-05",
+    "same_meaning": true
+  },
+  {
+    "id": "para-06",
+    "prompt": "Pull the email address out of 'Contact us at support@example.com for help.'",
+    "source_id": "golden-06",
+    "same_meaning": true
+  },
+  {
+    "id": "para-07",
+    "prompt": "Show a one-line Python command that prints 'Hello World'.",
+    "source_id": "golden-07",
+    "same_meaning": true
+  },
+  {
+    "id": "para-08",
+    "prompt": "What is the weather in Tokyo right now?",
+    "source_id": "golden-08",
+    "same_meaning": true
+  },
+  {
+    "id": "para-09",
+    "prompt": "Calculate 15 times 8.",
+    "source_id": "golden-09",
+    "same_meaning": true
+  },
+  {
+    "id": "para-10",
+    "prompt": "Give a brief summary of 'The quick brown fox jumps over the lazy dog.'",
+    "source_id": "golden-10",
+    "same_meaning": true
+  },
+  {
+    "id": "para-11",
+    "prompt": "Describe how a process differs from a thread in operating systems, including advantages and disadvantages.",
+    "source_id": "golden-11",
+    "same_meaning": true
+  },
+  {
+    "id": "para-12",
+    "prompt": "Create a Python function that reads a CSV file, computes the mean of a chosen column, and skips missing values and malformed rows.",
+    "source_id": "golden-12",
+    "same_meaning": true
+  },
+  {
+    "id": "para-13",
+    "prompt": "Compose a courteous business email asking for more time on a project because of unexpected supplier delays.",
+    "source_id": "golden-13",
+    "same_meaning": true
+  },
+  {
+    "id": "para-14",
+    "prompt": "Find the roots of 2x^2 + 5x - 3 = 0 with step-by-step factoring and a derivation using the quadratic formula.",
+    "source_id": "golden-14",
+    "same_meaning": true
+  },
+  {
+    "id": "para-15",
+    "prompt": "Outline the main architectural patterns of microservices compared with monoliths, and explain when each is appropriate.",
+    "source_id": "golden-15",
+    "same_meaning": true
+  },
+  {
+    "id": "para-16",
+    "prompt": "Render this contract termination clause in German while keeping the formal legal wording.",
+    "source_id": "golden-16",
+    "same_meaning": true
+  },
+  {
+    "id": "para-17",
+    "prompt": "Use web search to get Apple's current stock price and present a markdown table showing its 5-day performance.",
+    "source_id": "golden-17",
+    "same_meaning": true
+  },
+  {
+    "id": "para-18",
+    "prompt": "Contrast the indexing approaches of PostgreSQL and MongoDB, covering B-Tree, GIN, and compound indexes.",
+    "source_id": "golden-18",
+    "same_meaning": true
+  },
+  {
+    "id": "para-19",
+    "prompt": "Using window functions, write an SQL query that returns the top 3 customers by spending in every product category for the last year.",
+    "source_id": "golden-19",
+    "same_meaning": true
+  },
+  {
+    "id": "para-20",
+    "prompt": "Create a persuasive 3-paragraph blog post for launching a new command-line tool aimed at developers.",
+    "source_id": "golden-20",
+    "same_meaning": true
+  },
+  {
+    "id": "para-21",
+    "prompt": "Diagnose a 400-line asynchronous deadlock in Python involving nested asyncio.gather calls and custom TaskGroup exception handlers. Identify race conditions and circular-reference memory leaks across coroutines, then write full pytest-asyncio tests that reproduce and fix every problem.",
+    "source_id": "golden-21",
+    "same_meaning": true
+  },
+  {
+    "id": "para-22",
+    "prompt": "Use proof by contradiction to show that sqrt(2) is irrational, then extend the argument with the Fundamental Theorem of Arithmetic to prove that sqrt(n) is irrational for every non-square integer n.",
+    "source_id": "golden-22",
+    "same_meaning": true
+  },
+  {
+    "id": "para-23",
+    "prompt": "Create a complete distributed consensus protocol based on Raft that supports dynamic membership changes, log compaction, snapshot streaming, and recovery from network partitions. Include safety proofs and state transition tables.",
+    "source_id": "golden-23",
+    "same_meaning": true
+  },
+  {
+    "id": "para-24",
+    "prompt": "Build a lock-free MPMC bounded ring-buffer queue in C++20 with atomic CAS and acquire/release/seq_cst memory orders, and describe how ABA and cache-line bouncing are prevented.",
+    "source_id": "golden-24",
+    "same_meaning": true
+  },
+  {
+    "id": "para-25",
+    "prompt": "Produce a thorough comparison of zero-knowledge proof systems — zk-SNARKs, zk-STARKs, and Bulletproofs — assessing elliptic-curve pairings, trusted-setup requirements, arithmetization approaches (R1CS and AIR), and resistance to quantum attacks.",
+    "source_id": "golden-25",
+    "same_meaning": true
+  },
+  {
+    "id": "para-26",
+    "prompt": "Orchestrate a multi-stage autonomous workflow for web scraping and data cleaning: use browser automation to get past complex bot challenges, pull paginated dynamic tables, validate the schema with Pydantic, and generate an enriched analytics report.",
+    "source_id": "golden-26",
+    "same_meaning": true
+  },
+  {
+    "id": "para-27",
+    "prompt": "Implement a full optimizing IR pass for a compiler in Rust that does dead-code elimination, constant propagation, and loop-invariant code motion using dominance frontier analysis.",
+    "source_id": "golden-27",
+    "same_meaning": true
+  },
+  {
+    "id": "para-28",
+    "prompt": "Starting from continuum mechanics and the Reynolds transport theorem, derive the Navier-Stokes equations and explain how the Cauchy stress tensor splits into pressure and viscous stress.",
+    "source_id": "golden-28",
+    "same_meaning": true
+  },
+  {
+    "id": "para-29",
+    "prompt": "Prepare a detailed patent claim specification and architecture diagram for a new decentralized, Byzantine fault-tolerant identity verification protocol spanning sharded ledgers.",
+    "source_id": "golden-29",
+    "same_meaning": true
+  },
+  {
+    "id": "para-30",
+    "prompt": "Examine a complete Linux kernel coredump backtrace from an RCU stall in a custom network driver, covering CPU cache coherency, smp_mb memory barriers, and softirq starvation.",
+    "source_id": "golden-30",
+    "same_meaning": true
+  }
+]

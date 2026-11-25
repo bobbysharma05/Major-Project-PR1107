@@ -200,6 +200,29 @@ def test_paraphrase_is_replayed_as_a_semantic_hit(
     assert routed.data["reason"] == "Served from response cache"
 
 
+def test_semantic_hit_touches_the_matched_entry(
+    registry: ModelRegistry, storage: Storage, calls: List[str]
+) -> None:
+    """A semantic hit updates the stored source entry's hit_count/last_hit_at."""
+    _seed_entry(storage, SOURCE)
+    with sqlite3.connect(storage.db_path) as conn:
+        conn.execute("UPDATE response_cache SET last_hit_at = 0")
+
+    chat = _engine(registry, storage)
+    _events, done, _text = _collect(chat, _request(PARAPHRASE))
+    assert done["metadata"]["cache"]["kind"] == "semantic"
+    assert calls == []
+
+    with sqlite3.connect(storage.db_path) as conn:
+        rows = conn.execute(
+            "SELECT key, hit_count, last_hit_at FROM response_cache"
+        ).fetchall()
+    assert len(rows) == 1  # the paraphrase itself was never stored
+    _key, hit_count, last_hit_at = rows[0]
+    assert hit_count == 1
+    assert last_hit_at > 0
+
+
 def test_numeric_change_is_a_miss_and_logs_the_near_miss(
     registry: ModelRegistry, storage: Storage, calls: List[str]
 ) -> None:

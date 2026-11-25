@@ -382,7 +382,10 @@ class ChatEngine:
             except Exception as exc:
                 logger.warning("Cache hit routing log failed: %s", exc)
             try:
-                self.storage.touch_cache_entry(cache_key_parts.key)
+                # Touch the entry that actually matched.  On a semantic hit this
+                # is the stored source entry, not the paraphrase's key.
+                matched_key = str(cache_entry.get("key") or cache_key_parts.key)
+                self.storage.touch_cache_entry(matched_key)
             except Exception as exc:
                 logger.warning("Cache touch failed: %s", exc)
             yield StreamEvent(type=StreamEventType.USAGE, usage=replay_usage)

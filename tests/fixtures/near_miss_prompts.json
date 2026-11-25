@@ -1,0 +1,92 @@
+[
+  {
+    "id": "near-01",
+    "prompt": "What is the capital city of Germany?",
+    "source_id": "golden-02",
+    "same_meaning": false
+  },
+  {
+    "id": "near-02",
+    "prompt": "Convert 212 degrees Fahrenheit to Celsius.",
+    "source_id": "golden-03",
+    "same_meaning": false
+  },
+  {
+    "id": "near-03",
+    "prompt": "What is 15 multiplied by 9?",
+    "source_id": "golden-09",
+    "same_meaning": false
+  },
+  {
+    "id": "near-04",
+    "prompt": "Explain the difference between a process and a thread in operating systems, but do not include pros and cons.",
+    "source_id": "golden-11",
+    "same_meaning": false
+  },
+  {
+    "id": "near-05",
+    "prompt": "Write a Python function to parse a JSON file and calculate the average of a specific column, handling missing values and invalid rows.",
+    "source_id": "golden-12",
+    "same_meaning": false
+  },
+  {
+    "id": "near-06",
+    "prompt": "Solve the quadratic equation 2x^2 + 5x - 4 = 0 showing step-by-step factoring and quadratic formula derivation.",
+    "source_id": "golden-14",
+    "same_meaning": false
+  },
+  {
+    "id": "near-07",
+    "prompt": "Fetch the latest stock price for Microsoft using web search and format a markdown table of its 5-day performance.",
+    "source_id": "golden-17",
+    "same_meaning": false
+  },
+  {
+    "id": "near-08",
+    "prompt": "Compare MySQL and Redis indexing strategies, including B-Tree, GIN, and compound indexes.",
+    "source_id": "golden-18",
+    "same_meaning": false
+  },
+  {
+    "id": "near-09",
+    "prompt": "Write an SQL query to find the top 5 highest-spending customers in each product category over the past year using window functions.",
+    "source_id": "golden-19",
+    "same_meaning": false
+  },
+  {
+    "id": "near-10",
+    "prompt": "Write a 5-paragraph compelling product launch blog post introducing a developer CLI tool.",
+    "source_id": "golden-20",
+    "same_meaning": false
+  },
+  {
+    "id": "near-11",
+    "prompt": "Debug this 400-line synchronous deadlock in Python with nested asyncio.gather and custom TaskGroup exception handlers. Find race conditions, memory leaks in circular references across coroutines, and write complete pytest-asyncio unit tests reproducing and fixing each issue.",
+    "source_id": "golden-21",
+    "same_meaning": false
+  },
+  {
+    "id": "near-12",
+    "prompt": "Prove by contradiction that the square root of 3 is irrational, and then generalize the proof to show that the square root of any non-square integer n is irrational using the Fundamental Theorem of Arithmetic.",
+    "source_id": "golden-22",
+    "same_meaning": false
+  },
+  {
+    "id": "near-13",
+    "prompt": "Design an end-to-end distributed consensus protocol using Paxos with dynamic cluster membership changes, log compaction, snapshot streaming, and partitioned network recovery. Detail safety proofs and state transition tables.",
+    "source_id": "golden-23",
+    "same_meaning": false
+  },
+  {
+    "id": "near-14",
+    "prompt": "Write a complete optimizing compiler intermediate representation (IR) pass in Go that performs dead code elimination, constant propagation, and loop invariant code motion with dominance frontier analysis.",
+    "source_id": "golden-27",
+    "same_meaning": false
+  },
+  {
+    "id": "near-15",
+    "prompt": "Analyze a full Windows kernel crash dump backtrace caused by an RCU stall in a custom network driver, explaining CPU cache coherency, smp_mb memory barriers, and softirq starvation.",
+    "source_id": "golden-30",
+    "same_meaning": false
+  }
+]
