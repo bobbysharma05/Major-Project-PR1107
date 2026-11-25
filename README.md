@@ -18,14 +18,15 @@ For every turn, ModelMesh classifies the prompt, works out how capable a model i
 8. [Tools and Skills](#tools-and-skills)
 9. [Desktop Interface](#desktop-interface)
 10. [Response cache](#response-cache)
-11. [Command-Line Interface](#command-line-interface)
-12. [Installation](#installation)
-13. [Configuration](#configuration)
-14. [Running and Testing](#running-and-testing)
-15. [Project Structure](#project-structure)
-16. [Changelog](#changelog)
-17. [Datasets and Models](#datasets-and-models)
-18. [Attribution](#attribution)
+11. [Gateway](#gateway)
+12. [Command-Line Interface](#command-line-interface)
+13. [Installation](#installation)
+14. [Configuration](#configuration)
+15. [Running and Testing](#running-and-testing)
+16. [Project Structure](#project-structure)
+17. [Changelog](#changelog)
+18. [Datasets and Models](#datasets-and-models)
+19. [Attribution](#attribution)
 
 ---
 
@@ -216,7 +217,7 @@ semantic:
   max_candidates: 500
 ```
 
-Cached answers may contain text the user typed and are stored in the local SQLite database under `data/` (git-ignored). Set `store_answers: false` if that is not acceptable: the cache then performs no reads and no writes.
+Cached answers may contain text the user typed and are stored in the local SQLite database at `MODELMESH_DB_PATH` when that variable is set, otherwise `data/modelmesh.db` under the working directory or project root (git-ignored). Set `store_answers: false` if that is not acceptable: the cache then performs no reads and no writes.
 
 **CLI commands:**
 
@@ -254,6 +255,82 @@ These numbers are the reason semantic matching stays off by default. Exact cachi
 
 ---
 
+## Gateway
+
+A small OpenAI-compatible HTTP gateway exposes the routing engine to any client that speaks the Chat Completions API. It is optional and kept out of the core dependency set.
+
+### Install and keys
+
+```bash
+pip install -e ".[gateway]"
+
+modelmesh-cli keys create my-laptop
+modelmesh-cli keys list
+modelmesh-cli keys revoke <id>
+```
+
+A key is shown **once** at creation; store it immediately. Only its SHA-256 hash is written to SQLite, so a lost key cannot be recovered or displayed again. Revoked and unknown keys are rejected. The gateway reads keys from the same database as the CLI (set `MODELMESH_DB_PATH` to use a different file).
+
+### Start the server
+
+```bash
+modelmesh-gateway
+```
+
+Flags:
+
+- `--host` — bind address, default `127.0.0.1`
+- `--port` — default `8000`
+- `--config` — path to a custom `providers.yaml` or config directory
+- `--env-file` — path to a `.env` file
+- `--default-strategy` — strategy used when `model` is `auto`, default `cheapest_first`
+
+Binding to anything other than loopback prints a loud warning: the gateway carries your private keys and has no built-in rate limiting.
+
+### Endpoints
+
+- `GET /health` — liveness probe, no authentication.
+- `GET /v1/models` — requires `Authorization: Bearer <key>`; returns `auto` plus every enabled model id.
+- `POST /v1/chat/completions` — requires the same header; non-streaming chat completion.
+
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer mm-...' \
+  -d '{"model":"auto","messages":[{"role":"user","content":"Hello!"}]}'
+```
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://127.0.0.1:8000/v1",
+    api_key="mm-...",
+)
+response = client.chat.completions.create(
+    model="auto",
+    messages=[{"role": "user", "content": "Hello!"}],
+)
+print(response.choices[0].message.content)
+```
+
+The `model` field follows these rules:
+
+- `auto` uses `--default-strategy` (`cheapest_first` unless changed).
+- `random`, `cheapest_first`, `expensive_first` and `smart_clef` select that routing strategy.
+- `manual` is rejected with 400; use a real model id instead.
+- Any other value is treated as a pinned logical model id and returns 404 if the registry does not know it.
+
+Each response is a normal OpenAI `chat.completion` object with one extra `modelmesh` object containing `strategy`, `endpoint_id`, `provider_id`, `cost_usd`, `latency_sec` and `cache` (with `status`, and `kind`/`similarity` for semantic hits). Repeated identical requests are served from the response cache at `cost_usd: 0`, and the second response reports `cache.status: "hit"`.
+
+Errors use OpenAI's envelope `{"error": {"message", "type", "code"}}`: 400 for an invalid request, 401 for a missing/invalid/revoked key, 404 for an unknown model, 503 when no model is available, 502 for an upstream provider failure, and 500 for an unexpected server error. Raw provider details and API keys are never echoed.
+
+### Limitations
+
+This gateway is deliberately minimal: no streaming, text-only messages, no tools, no per-key quotas and no usage dashboard, no rate limiting, and a single process. It binds to localhost by default and does not save conversations — each request is one standalone turn recorded only in the routing log.
+
+---
+
 ## Command-Line Interface
 
 The `modelmesh-cli` entry point runs single turns and manages score data without the GUI.
@@ -286,7 +363,7 @@ modelmesh-cli scores auto-match
 ### Steps
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/maulik-sharma/Major-Project-PR1107.git
 cd Major-Project-PR1107
 
 python3 -m venv .venv
@@ -397,7 +474,7 @@ modelmesh                 # desktop application
 pytest                    # full test suite
 ```
 
-The test suite (226 tests) covers the provider adapters, error mapping, routing strategies, the selector and scoring maths, score sources and matching, catalog parsing and diffing, the chat engine, and the main UI flows under an offscreen Qt platform. Tests make no network calls and do not read real API keys.
+The test suite (368 tests) covers the provider adapters, error mapping, routing strategies, the selector and scoring maths, score sources and matching, catalog parsing and diffing, the chat engine, the response cache, the HTTP gateway, and the main UI flows under an offscreen Qt platform. Tests make no network calls and do not read real API keys.
 
 ---
 
@@ -443,6 +520,12 @@ The test suite (226 tests) covers the provider adapters, error mapping, routing 
 ## Changelog
 
 The following changes were made in the most recent revision. They fix defects in the original implementation and add the score and catalog features described above.
+
+### Gateway and API keys
+
+- Added an optional OpenAI-compatible HTTP gateway with sync FastAPI endpoints, private `mm-` API keys (stored only as SHA-256 hashes), and `modelmesh-cli keys create|list|revoke`.
+- The gateway exposes `/health`, authenticated `/v1/models` and `/v1/chat/completions`, with OpenAI-shaped errors and a `modelmesh` response extension. It is single-process, text-only, local-only by default, and has no streaming, quotas or rate limiting.
+- Added a stdlib smoke test (`scripts/gateway_smoke.py`) that checks health, auth, model listing, completion shape and cache replay.
 
 ### Response cache
 
@@ -512,7 +595,7 @@ The following changes were made in the most recent revision. They fix defects in
 ### Testing
 
 - The test suite no longer makes network calls or reads real credentials or user settings.
-- Added tests for health tracking, decision fallback, metric selection, both score sources, the request path, catalog parsing and application, and the main UI flows. The suite grew from 124 to 226 tests.
+- Added tests for health tracking, decision fallback, metric selection, both score sources, the request path, catalog parsing and application, and the main UI flows. The suite grew from 124 tests to its current 368 tests.
 
 ---
 
