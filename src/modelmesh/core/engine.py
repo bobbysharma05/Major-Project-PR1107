@@ -77,6 +77,15 @@ class ChatEngine:
         self._embedder = None
         self._embedder_key = None
 
+    @property
+    def _cache_enabled(self) -> bool:
+        """Whether response caching may read or write at all.
+
+        ``store_answers: false`` is a privacy switch: the cache is disabled
+        completely, because a cached answer can contain user text.
+        """
+        return bool(self.cache_config.enabled and self.cache_config.store_answers)
+
     def _health_tracker(self) -> Optional[Any]:
         """Return the router's endpoint health tracker, if any."""
         return getattr(self.router, "health_tracker", None) if self.router is not None else None
@@ -284,7 +293,7 @@ class ChatEngine:
         cache_entry: Optional[Dict[str, Any]] = None
         cached_candidate: Optional[Candidate] = None
 
-        if self.cache_config.enabled and self.storage is not None and cacheable:
+        if self._cache_enabled and self.storage is not None and cacheable:
             try:
                 cache_scope = (
                     candidate.endpoint_id
@@ -725,7 +734,7 @@ class ChatEngine:
             price_out_per_mtok=successful_candidate.price_out_per_mtok,
         )
 
-        if not self.cache_config.enabled:
+        if not self._cache_enabled:
             cache_meta: Dict[str, Any] = {"status": "not_cacheable", "reason": "cache_disabled"}
         elif self.storage is None:
             cache_meta = {"status": "not_cacheable", "reason": "no_storage"}
@@ -753,7 +762,7 @@ class ChatEngine:
             )
 
         if (
-            self.cache_config.enabled
+            self._cache_enabled
             and self.storage is not None
             and cache_key_parts is not None
             and not cache_hit

@@ -46,6 +46,9 @@ class CacheConfig(BaseModel):
     """
 
     enabled: bool = True
+    # Storing an answer also stores any user text reproduced in it.  Setting
+    # this to false disables the cache entirely (reads and writes).
+    store_answers: bool = True
     ttl_seconds: int = Field(default=86400, gt=0)
     max_entries: int = Field(default=2000, gt=0)
     min_answer_chars: int = Field(default=1, ge=0)

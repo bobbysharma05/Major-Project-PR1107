@@ -399,3 +399,24 @@ def test_same_prompt_hits_when_mocked_base_date_changes(
     assert len(calls) == 1
     assert done["cost_usd"] == 0.0
     assert text
+
+
+def test_store_answers_false_disables_cache_reads_and_writes(
+    registry: ModelRegistry, storage: Storage, calls: List[str]
+) -> None:
+    """The privacy switch prevents both storing and replaying answers."""
+    chat = ChatEngine(
+        registry=registry,
+        router=Router(registry=registry, storage=storage),
+        storage=storage,
+        cache_config=CacheConfig(store_answers=False),
+    )
+    _collect(chat, _request("private question"))
+    _events, done, _text = _collect(chat, _request("private question"))
+
+    assert len(calls) == 2
+    assert done["metadata"]["cache"] == {
+        "status": "not_cacheable",
+        "reason": "cache_disabled",
+    }
+    assert storage.response_cache_stats()["entries"] == 0

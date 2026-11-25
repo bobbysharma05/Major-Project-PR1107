@@ -17,14 +17,15 @@ For every turn, ModelMesh classifies the prompt, works out how capable a model i
 7. [Models, Endpoints and Candidates](#models-endpoints-and-candidates)
 8. [Tools and Skills](#tools-and-skills)
 9. [Desktop Interface](#desktop-interface)
-10. [Command-Line Interface](#command-line-interface)
-11. [Installation](#installation)
-12. [Configuration](#configuration)
-13. [Running and Testing](#running-and-testing)
-14. [Project Structure](#project-structure)
-15. [Changelog](#changelog)
-16. [Datasets and Models](#datasets-and-models)
-17. [Attribution](#attribution)
+10. [Response cache](#response-cache)
+11. [Command-Line Interface](#command-line-interface)
+12. [Installation](#installation)
+13. [Configuration](#configuration)
+14. [Running and Testing](#running-and-testing)
+15. [Project Structure](#project-structure)
+16. [Changelog](#changelog)
+17. [Datasets and Models](#datasets-and-models)
+18. [Attribution](#attribution)
 
 ---
 
@@ -185,6 +186,74 @@ Skills are Markdown files stored under `skills/<name>/SKILL.md`, with YAML front
 
 ---
 
+## Response cache
+
+ModelMesh can replay a previous final answer instead of calling a provider again. It is a full-answer cache, not provider-side prefix caching, and it is independent of the routing decision cache.
+
+**What is cached.** Only the final assistant text, together with the token counts and cost of the original turn. The cache key is a SHA-256 over canonical JSON of the normalised last user message, a hash of the preceding conversation context, a hash of the effective system prompt (with the date-bearing base prompt excluded), the generation parameters, and the pinned model/endpoint id or `auto`. The routing strategy is deliberately not part of the key.
+
+**What is never cached.** Requests containing tools or attachments, requests with tool history, and turns with no user message. Regenerate/retry turns bypass cache reads. Hits replay the stored answer at zero provider cost; missed or non-cacheable turns are recorded normally.
+
+**TTL and eviction.** Entries expire after `ttl_seconds` (one day by default) and are purged at CLI startup. When the table exceeds `max_entries`, the row with the oldest `last_hit_at` is evicted. Cache metrics are derived from `routing_log.cache_status`, so hit rows report saved tokens/cost rather than real spend.
+
+**Semantic matching is opt-in and experimental.** When enabled, embeddings are compared against recent entries that share the same context, system prompt, generation parameters and model scope. Even a high cosine score is rejected when numbers, negations or prompt length differ. The dependency-free `HashingEmbedder` is mostly lexical: it uses word unigrams, bigrams and character 3-grams, so it misses many natural paraphrases while long prompts can exceed a high threshold after a single entity swap. A neural backend is available through the optional `sentence-transformers` extra. Semantic matching is disabled by default and should be treated as experimental.
+
+**Config keys** (`config/cache.yaml`):
+
+```yaml
+enabled: true
+store_answers: true          # false disables the cache completely (privacy switch)
+ttl_seconds: 86400
+max_entries: 2000
+min_answer_chars: 1
+max_answer_chars: 20000
+replay_chunk_chars: 40
+semantic:
+  enabled: false             # opt-in, experimental
+  threshold: 0.92            # higher is more conservative
+  embedder: hashing          # or sentence_transformers
+  hashing_dim: 512
+  max_candidates: 500
+```
+
+Cached answers may contain text the user typed and are stored in the local SQLite database under `data/` (git-ignored). Set `store_answers: false` if that is not acceptable: the cache then performs no reads and no writes.
+
+**CLI commands:**
+
+```bash
+modelmesh-cli cache stats                  # entries, hits, saved tokens/cost
+modelmesh-cli cache clear                  # remove every cached answer
+modelmesh-cli cache purge                  # remove expired entries only
+modelmesh-cli "Your prompt" --no-cache     # skip the cache for one turn
+python scripts/cache_eval.py --provider mock
+python scripts/cache_eval.py --provider live --yes-i-know-this-spends-quota --phases A,B
+```
+
+`cache_eval.py` runs four phases against a clean temporary SQLite database: A cold, B exact repeat, C paraphrases and D near misses. Live mode requires confirmation, uses only the configured free Groq endpoint, and `--phases A,B` limits it to a cheap exact-match-only run.
+
+**Measured mock results** (full text in `results/cache_eval.md`):
+
+| Measurement | Result |
+|---|---|
+| Exact repeats (phase B) | 30/30 hits, $0.000000 spend |
+| Paraphrases with semantic matching at 0.92 | 0/30 hits |
+| Near misses with semantic matching at 0.92 | 3/15 false hits |
+
+Threshold sweep (paraphrase semantic hit rate / near-miss false-hit rate):
+
+| Threshold | Paraphrase hits | Near-miss false hits |
+|---|---|---|
+| 0.80 | 3/30 (10.0%) | 6/15 (40.0%) |
+| 0.90 | 0/30 (0.0%) | 5/15 (33.3%) |
+| 0.92 | 0/30 (0.0%) | 3/15 (20.0%) |
+| 0.95 | 0/30 (0.0%) | 1/15 (6.7%) |
+
+These numbers are the reason semantic matching stays off by default. Exact caching is reliable; semantic caching with the hashing embedder is not yet good enough to enable blindly.
+
+**Limitations.** Cached answers can go stale when facts or instructions change. Semantic matching can still produce wrong hits, especially for long prompts differing by one entity. The hashing embedder is mostly lexical, so short paraphrases often score below the threshold. False hits replay an answer to a different question at zero cost.
+
+---
+
 ## Command-Line Interface
 
 The `modelmesh-cli` entry point runs single turns and manages score data without the GUI.
@@ -217,7 +286,7 @@ modelmesh-cli scores auto-match
 ### Steps
 
 ```bash
-git clone https://github.com/maulik-sharma/Major-Project-PR1107.git
+git clone <your-repo-url>
 cd Major-Project-PR1107
 
 python3 -m venv .venv
@@ -374,6 +443,15 @@ The test suite (226 tests) covers the provider adapters, error mapping, routing 
 ## Changelog
 
 The following changes were made in the most recent revision. They fix defects in the original implementation and add the score and catalog features described above.
+
+### Response cache
+
+- Added the response cache with exact and opt-in semantic matching, invalidation commands, observability, settings and a reproducible evaluation harness.
+- The real mock evaluation is documented above: 30/30 exact hits, but 0/30 paraphrase hits and 3/15 false hits at threshold 0.92 with the hashing embedder. Semantic matching remains opt-in and experimental.
+- `python scripts/cache_eval.py --phases A,B` runs only the cold and exact-repeat phases, so live evaluations can avoid the quota cost of the semantic sweep.
+- Concurrent identical turns are safe: writes use `INSERT OR REPLACE` under the storage lock, and replay yields events after the lock is released.
+- Added the `store_answers` privacy switch (`false` disables reads and writes, because cached answers can contain user text).
+- Stray `~/.local/share/modelmesh/*` database files were removed from git; `*.db` files and `~/` are git-ignored.
 
 ### Routing
 

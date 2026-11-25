@@ -51,6 +51,8 @@ from modelmesh.core.storage import Storage
 from modelmesh.core.types import Candidate, ChatRequest, Message, StreamEventType
 
 DEFAULT_THRESHOLDS: Tuple[float, ...] = (0.80, 0.90, 0.92, 0.95)
+ALL_PHASES: Tuple[str, ...] = ("A", "B", "C", "D")
+DEFAULT_PHASES: Tuple[str, ...] = ALL_PHASES
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "results"
 GOLDEN_PATH = REPO_ROOT / "tests" / "fixtures" / "golden_prompts.json"
 PARAPHRASE_PATH = REPO_ROOT / "tests" / "fixtures" / "paraphrase_prompts.json"
@@ -395,158 +397,173 @@ def run_evaluation(
     paraphrases: Sequence[Dict[str, Any]],
     near_misses: Sequence[Dict[str, Any]],
     golden_by_id: Dict[str, Dict[str, Any]],
+    phases: Sequence[str] = DEFAULT_PHASES,
 ) -> Dict[str, Any]:
-    """Run all four phases and return the JSON-ready result payload."""
+    """Run the requested phases and return the JSON-ready result payload."""
+    requested = tuple(phases)
     registry, candidate = build_registry(provider)
     with tempfile.TemporaryDirectory(prefix="modelmesh-cache-eval-") as temp_dir:
         storage = Storage(db_path=Path(temp_dir) / "eval.db")
+        records_a: List[Dict[str, Any]] = []
+        records_b: List[Dict[str, Any]] = []
+        records_c: List[Dict[str, Any]] = []
+        records_d: List[Dict[str, Any]] = []
+        c_runs: Dict[str, Dict[str, Any]] = {}
+        d_runs: Dict[str, Dict[str, Any]] = {}
 
         # Phase A: guaranteed cold pass.  bypass_cache=True means the read path
         # is skipped, but the store path still writes an answer + embedding.
-        cold_engine = make_engine(
-            registry, storage, semantic_enabled=True, threshold=thresholds[0]
-        )
-        records_a = run_phase(
-            cold_engine,
-            candidate,
-            golden,
-            phase="A_cold",
-            run="cold",
-            bypass_cache=True,
-            provider=provider,
-            golden_by_id=golden_by_id,
-        )
+        if "A" in requested:
+            cold_engine = make_engine(
+                registry, storage, semantic_enabled=True, threshold=thresholds[0]
+            )
+            records_a = run_phase(
+                cold_engine,
+                candidate,
+                golden,
+                phase="A_cold",
+                run="cold",
+                bypass_cache=True,
+                provider=provider,
+                golden_by_id=golden_by_id,
+            )
 
         # Phase B: exact repeats against the entries written in phase A.
-        exact_engine = make_engine(
-            registry, storage, semantic_enabled=False, threshold=thresholds[0]
-        )
-        records_b = run_phase(
-            exact_engine,
-            candidate,
-            golden,
-            phase="B_exact_repeat",
-            run="exact_repeat",
-            bypass_cache=False,
-            provider=provider,
-            golden_by_id=golden_by_id,
-        )
-
-        entries = storage.response_cache_stats()["entries"]
-        if entries != len(golden):
-            raise RuntimeError(
-                f"expected {len(golden)} warmed cache entries, found {entries}"
+        if "B" in requested:
+            exact_engine = make_engine(
+                registry, storage, semantic_enabled=False, threshold=thresholds[0]
             )
+            records_b = run_phase(
+                exact_engine,
+                candidate,
+                golden,
+                phase="B_exact_repeat",
+                run="exact_repeat",
+                bypass_cache=False,
+                provider=provider,
+                golden_by_id=golden_by_id,
+            )
+
+        if requested and set(requested) & {"B", "C", "D"}:
+            entries = storage.response_cache_stats()["entries"]
+            if entries != len(golden):
+                raise RuntimeError(
+                    f"expected {len(golden)} warmed cache entries, found {entries}"
+                )
 
         # Phases C/D read the golden entries and never write new ones.
         read_only = ReadOnlyCache(storage)
-        c_runs: Dict[str, Dict[str, Any]] = {}
-        d_runs: Dict[str, Dict[str, Any]] = {}
-        records_c: List[Dict[str, Any]] = []
-        records_d: List[Dict[str, Any]] = []
 
-        baseline_c_engine = make_engine(
-            registry, read_only, semantic_enabled=False, threshold=thresholds[0]
-        )
-        baseline_c = run_phase(
-            baseline_c_engine,
-            candidate,
-            paraphrases,
-            phase="C_paraphrase",
-            run="semantic_disabled",
-            bypass_cache=False,
-            provider=provider,
-            golden_by_id=golden_by_id,
-        )
-        records_c.extend(baseline_c)
-        c_runs["disabled"] = summarize(
-            baseline_c,
-            phase="C_paraphrase",
-            run="semantic_disabled",
-            semantic_enabled=False,
-            threshold=None,
-        )
-
-        baseline_d_engine = make_engine(
-            registry, read_only, semantic_enabled=False, threshold=thresholds[0]
-        )
-        baseline_d = run_phase(
-            baseline_d_engine,
-            candidate,
-            near_misses,
-            phase="D_near_miss",
-            run="semantic_disabled",
-            bypass_cache=False,
-            provider=provider,
-            golden_by_id=golden_by_id,
-        )
-        records_d.extend(baseline_d)
-        d_runs["disabled"] = summarize(
-            baseline_d,
-            phase="D_near_miss",
-            run="semantic_disabled",
-            semantic_enabled=False,
-            threshold=None,
-        )
-
-        for threshold in thresholds:
-            key = f"{threshold:.2f}"
-            c_engine = make_engine(
-                registry, read_only, semantic_enabled=True, threshold=threshold
+        if "C" in requested:
+            baseline_c_engine = make_engine(
+                registry, read_only, semantic_enabled=False, threshold=thresholds[0]
             )
-            c_records = run_phase(
-                c_engine,
+            baseline_c = run_phase(
+                baseline_c_engine,
                 candidate,
                 paraphrases,
                 phase="C_paraphrase",
-                run=f"semantic_{key}",
+                run="semantic_disabled",
                 bypass_cache=False,
                 provider=provider,
                 golden_by_id=golden_by_id,
             )
-            records_c.extend(c_records)
-            c_runs[key] = summarize(
-                c_records,
+            records_c.extend(baseline_c)
+            c_runs["disabled"] = summarize(
+                baseline_c,
                 phase="C_paraphrase",
-                run=f"semantic_{key}",
-                semantic_enabled=True,
-                threshold=threshold,
+                run="semantic_disabled",
+                semantic_enabled=False,
+                threshold=None,
             )
 
-            d_engine = make_engine(
-                registry, read_only, semantic_enabled=True, threshold=threshold
+        if "D" in requested:
+            baseline_d_engine = make_engine(
+                registry, read_only, semantic_enabled=False, threshold=thresholds[0]
             )
-            d_records = run_phase(
-                d_engine,
+            baseline_d = run_phase(
+                baseline_d_engine,
                 candidate,
                 near_misses,
                 phase="D_near_miss",
-                run=f"semantic_{key}",
+                run="semantic_disabled",
                 bypass_cache=False,
                 provider=provider,
                 golden_by_id=golden_by_id,
             )
-            records_d.extend(d_records)
-            d_runs[key] = summarize(
-                d_records,
+            records_d.extend(baseline_d)
+            d_runs["disabled"] = summarize(
+                baseline_d,
                 phase="D_near_miss",
-                run=f"semantic_{key}",
-                semantic_enabled=True,
-                threshold=threshold,
+                run="semantic_disabled",
+                semantic_enabled=False,
+                threshold=None,
             )
 
-        sweep = [
-            {
-                "threshold": threshold,
-                "paraphrase_semantic_hit_rate": c_runs[f"{threshold:.2f}"][
-                    "semantic_hit_rate"
-                ],
-                "near_miss_false_hit_rate": d_runs[f"{threshold:.2f}"][
-                    "false_hit_rate"
-                ],
-            }
-            for threshold in thresholds
-        ]
+        for threshold in thresholds:
+            key = f"{threshold:.2f}"
+            if "C" in requested:
+                c_engine = make_engine(
+                    registry, read_only, semantic_enabled=True, threshold=threshold
+                )
+                c_records = run_phase(
+                    c_engine,
+                    candidate,
+                    paraphrases,
+                    phase="C_paraphrase",
+                    run=f"semantic_{key}",
+                    bypass_cache=False,
+                    provider=provider,
+                    golden_by_id=golden_by_id,
+                )
+                records_c.extend(c_records)
+                c_runs[key] = summarize(
+                    c_records,
+                    phase="C_paraphrase",
+                    run=f"semantic_{key}",
+                    semantic_enabled=True,
+                    threshold=threshold,
+                )
+
+            if "D" in requested:
+                d_engine = make_engine(
+                    registry, read_only, semantic_enabled=True, threshold=threshold
+                )
+                d_records = run_phase(
+                    d_engine,
+                    candidate,
+                    near_misses,
+                    phase="D_near_miss",
+                    run=f"semantic_{key}",
+                    bypass_cache=False,
+                    provider=provider,
+                    golden_by_id=golden_by_id,
+                )
+                records_d.extend(d_records)
+                d_runs[key] = summarize(
+                    d_records,
+                    phase="D_near_miss",
+                    run=f"semantic_{key}",
+                    semantic_enabled=True,
+                    threshold=threshold,
+                )
+
+        sweep = (
+            [
+                {
+                    "threshold": threshold,
+                    "paraphrase_semantic_hit_rate": c_runs[f"{threshold:.2f}"][
+                        "semantic_hit_rate"
+                    ],
+                    "near_miss_false_hit_rate": d_runs[f"{threshold:.2f}"][
+                        "false_hit_rate"
+                    ],
+                }
+                for threshold in thresholds
+            ]
+            if "C" in requested and "D" in requested
+            else []
+        )
 
         mock_failures = 0
         if provider == "mock":
@@ -556,9 +573,38 @@ def run_evaluation(
                 if not record["hit"] and not record.get("answer_contains_query"):
                     mock_failures += 1
 
+        phase_summaries: Dict[str, Any] = {}
+        if "A" in requested:
+            phase_summaries["A_cold"] = summarize(
+                records_a,
+                phase="A_cold",
+                run="cold",
+                semantic_enabled=True,
+                threshold=thresholds[0],
+            )
+        if "B" in requested:
+            phase_summaries["B_exact_repeat"] = summarize(
+                records_b,
+                phase="B_exact_repeat",
+                run="exact_repeat",
+                semantic_enabled=False,
+                threshold=thresholds[0],
+            )
+        if "C" in requested:
+            phase_summaries["C_paraphrase"] = {
+                "disabled": c_runs["disabled"],
+                "thresholds": c_runs,
+            }
+        if "D" in requested:
+            phase_summaries["D_near_miss"] = {
+                "disabled": d_runs["disabled"],
+                "thresholds": d_runs,
+            }
+
         return {
             "provider": provider,
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "phases_requested": list(requested),
             "thresholds": list(thresholds),
             "fixtures": {
                 "golden": len(golden),
@@ -572,24 +618,7 @@ def run_evaluation(
             },
             "database": "temporary SQLite DB (deleted after the run)",
             "mock_consistency_failures": mock_failures,
-            "phases": {
-                "A_cold": summarize(
-                    records_a,
-                    phase="A_cold",
-                    run="cold",
-                    semantic_enabled=True,
-                    threshold=thresholds[0],
-                ),
-                "B_exact_repeat": summarize(
-                    records_b,
-                    phase="B_exact_repeat",
-                    run="exact_repeat",
-                    semantic_enabled=False,
-                    threshold=thresholds[0],
-                ),
-                "C_paraphrase": {"disabled": c_runs["disabled"], "thresholds": c_runs},
-                "D_near_miss": {"disabled": d_runs["disabled"], "thresholds": d_runs},
-            },
+            "phases": phase_summaries,
             "threshold_sweep": sweep,
             "records": records_a + records_b + records_c + records_d,
         }
@@ -618,13 +647,9 @@ def _tokens(value: int) -> str:
 def render_markdown(results: Dict[str, Any]) -> str:
     """Render the evaluation payload as a report-ready Markdown table set."""
     phases = results["phases"]
-    a = phases["A_cold"]
-    b = phases["B_exact_repeat"]
-    c_disabled = phases["C_paraphrase"]["disabled"]
-    d_disabled = phases["D_near_miss"]["disabled"]
-    c_thresholds = phases["C_paraphrase"]["thresholds"]
-    d_thresholds = phases["D_near_miss"]["thresholds"]
     thresholds = results["thresholds"]
+    requested = tuple(results.get("phases_requested") or ALL_PHASES)
+    phase_arg = "" if requested == ALL_PHASES else f" --phases {','.join(requested)}"
 
     lines: List[str] = [
         "# ModelMesh Response Cache Evaluation",
@@ -633,154 +658,215 @@ def render_markdown(results: Dict[str, Any]) -> str:
         f"- Candidate: `{results['candidate']['endpoint_id']}` "
         f"({results['candidate']['model_id']})",
         f"- Generated: {results['generated_at']}",
+        f"- Phases: {', '.join(requested)}",
         f"- Golden prompts: {results['fixtures']['golden']}",
         f"- Paraphrases: {results['fixtures']['paraphrase']}",
         f"- Near misses: {results['fixtures']['near_miss']}",
         f"- Thresholds: {', '.join(f'{t:.2f}' for t in thresholds)}",
         "- Cache: isolated temporary SQLite DB, clean for this run",
         "",
-        "## Phase A — cold pass",
-        "",
-        "| Metric | Value |",
-        "|---|---|",
-        f"| Turns | {a['turns']} |",
-        f"| Hits | {a['hits']} ({_pct(a['hit_rate'])}) |",
-        f"| Avg latency | {_ms(a['avg_latency_ms'])} ms |",
-        f"| Total cost | {_money(a['total_cost_usd'])} |",
-        f"| Tokens saved | {_tokens(a['saved_tokens_total'])} |",
-        "",
-        "## Phase B — exact repeat pass",
-        "",
-        "| Metric | Value |",
-        "|---|---|",
-        f"| Turns | {b['turns']} |",
-        f"| Hits | {b['hits']} ({_pct(b['hit_rate'])}) |",
-        f"| Exact hits | {b['exact_hits']} |",
-        f"| Avg latency | {_ms(b['avg_latency_ms'])} ms |",
-        f"| Total cost | {_money(b['total_cost_usd'])} |",
-        f"| Tokens saved | {_tokens(b['saved_tokens_total'])} |",
-        "",
-        "## Phase C — paraphrase pass",
-        "",
-        "| Semantic | Threshold | Hits | Semantic hits | Semantic hit rate | "
-        "Avg latency (ms) | Total cost | Tokens saved |",
-        "|---|---|---|---|---|---|---|---|",
-        f"| disabled | — | {c_disabled['hits']} | {c_disabled['semantic_hits']} | "
-        f"{_pct(c_disabled['semantic_hit_rate'])} | {_ms(c_disabled['avg_latency_ms'])} | "
-        f"{_money(c_disabled['total_cost_usd'])} | {_tokens(c_disabled['saved_tokens_total'])} |",
     ]
-    for threshold in thresholds:
-        row = c_thresholds[f"{threshold:.2f}"]
-        lines.append(
-            f"| enabled | {threshold:.2f} | {row['hits']} | {row['semantic_hits']} | "
-            f"{_pct(row['semantic_hit_rate'])} | {_ms(row['avg_latency_ms'])} | "
-            f"{_money(row['total_cost_usd'])} | {_tokens(row['saved_tokens_total'])} |"
+
+    a = phases.get("A_cold")
+    if a is not None:
+        lines.extend(
+            [
+                "## Phase A — cold pass",
+                "",
+                "| Metric | Value |",
+                "|---|---|",
+                f"| Turns | {a['turns']} |",
+                f"| Hits | {a['hits']} ({_pct(a['hit_rate'])}) |",
+                f"| Avg latency | {_ms(a['avg_latency_ms'])} ms |",
+                f"| Total cost | {_money(a['total_cost_usd'])} |",
+                f"| Tokens saved | {_tokens(a['saved_tokens_total'])} |",
+                "",
+            ]
         )
 
-    lines.extend(
-        [
-            "",
-            "## Phase D — near-miss pass",
-            "",
-            "| Semantic | Threshold | Hits | False hits | False-hit rate | "
-            "Avg latency (ms) | Total cost | Tokens saved |",
-            "|---|---|---|---|---|---|---|---|",
-            f"| disabled | — | {d_disabled['hits']} | {d_disabled['false_hits']} | "
-            f"{_pct(d_disabled['false_hit_rate'])} | {_ms(d_disabled['avg_latency_ms'])} | "
-            f"{_money(d_disabled['total_cost_usd'])} | {_tokens(d_disabled['saved_tokens_total'])} |",
+    b = phases.get("B_exact_repeat")
+    if b is not None:
+        lines.extend(
+            [
+                "## Phase B — exact repeat pass",
+                "",
+                "| Metric | Value |",
+                "|---|---|",
+                f"| Turns | {b['turns']} |",
+                f"| Hits | {b['hits']} ({_pct(b['hit_rate'])}) |",
+                f"| Exact hits | {b['exact_hits']} |",
+                f"| Avg latency | {_ms(b['avg_latency_ms'])} ms |",
+                f"| Total cost | {_money(b['total_cost_usd'])} |",
+                f"| Tokens saved | {_tokens(b['saved_tokens_total'])} |",
+                "",
+            ]
+        )
+
+    c_block = phases.get("C_paraphrase")
+    if c_block is not None:
+        disabled = c_block["disabled"]
+        rows = c_block["thresholds"]
+        lines.extend(
+            [
+                "## Phase C — paraphrase pass",
+                "",
+                "| Semantic | Threshold | Hits | Semantic hits | Semantic hit rate | "
+                "Avg latency (ms) | Total cost | Tokens saved |",
+                "|---|---|---|---|---|---|---|---|",
+                f"| disabled | — | {disabled['hits']} | {disabled['semantic_hits']} | "
+                f"{_pct(disabled['semantic_hit_rate'])} | {_ms(disabled['avg_latency_ms'])} | "
+                f"{_money(disabled['total_cost_usd'])} | "
+                f"{_tokens(disabled['saved_tokens_total'])} |",
+            ]
+        )
+        for threshold in thresholds:
+            key = f"{threshold:.2f}"
+            row = rows.get(key)
+            if row is None:
+                continue
+            lines.append(
+                f"| enabled | {key} | {row['hits']} | {row['semantic_hits']} | "
+                f"{_pct(row['semantic_hit_rate'])} | {_ms(row['avg_latency_ms'])} | "
+                f"{_money(row['total_cost_usd'])} | {_tokens(row['saved_tokens_total'])} |"
+            )
+        lines.append("")
+
+    d_block = phases.get("D_near_miss")
+    if d_block is not None:
+        disabled = d_block["disabled"]
+        rows = d_block["thresholds"]
+        lines.extend(
+            [
+                "## Phase D — near-miss pass",
+                "",
+                "| Semantic | Threshold | Hits | False hits | False-hit rate | "
+                "Avg latency (ms) | Total cost | Tokens saved |",
+                "|---|---|---|---|---|---|---|---|",
+                f"| disabled | — | {disabled['hits']} | {disabled['false_hits']} | "
+                f"{_pct(disabled['false_hit_rate'])} | {_ms(disabled['avg_latency_ms'])} | "
+                f"{_money(disabled['total_cost_usd'])} | "
+                f"{_tokens(disabled['saved_tokens_total'])} |",
+            ]
+        )
+        for threshold in thresholds:
+            key = f"{threshold:.2f}"
+            row = rows.get(key)
+            if row is None:
+                continue
+            lines.append(
+                f"| enabled | {key} | {row['hits']} | {row['false_hits']} | "
+                f"{_pct(row['false_hit_rate'])} | {_ms(row['avg_latency_ms'])} | "
+                f"{_money(row['total_cost_usd'])} | {_tokens(row['saved_tokens_total'])} |"
+            )
+        lines.append("")
+
+    sweep = results.get("threshold_sweep") or []
+    if sweep:
+        lines.extend(
+            [
+                "## Threshold sweep",
+                "",
+                "| Threshold | Paraphrase semantic hit rate | Near-miss false-hit rate |",
+                "|---|---|---|",
+            ]
+        )
+        for point in sweep:
+            lines.append(
+                f"| {point['threshold']:.2f} | "
+                f"{_pct(point['paraphrase_semantic_hit_rate'])} | "
+                f"{_pct(point['near_miss_false_hit_rate'])} |"
+            )
+        lines.append("")
+
+    c_thresholds = c_block["thresholds"] if c_block else {}
+    d_thresholds = d_block["thresholds"] if d_block else {}
+    common = [
+        f"{threshold:.2f}"
+        for threshold in thresholds
+        if f"{threshold:.2f}" in c_thresholds and f"{threshold:.2f}" in d_thresholds
+    ]
+    if common:
+        default_key = "0.92" if "0.92" in common else common[-1]
+        default_c = c_thresholds[default_key]
+        default_d = d_thresholds[default_key]
+        false_ids = [
+            record["id"]
+            for record in results["records"]
+            if record["phase"] == "D_near_miss"
+            and record["run"] == f"semantic_{default_key}"
+            and record["hit"]
         ]
-    )
-    for threshold in thresholds:
-        row = d_thresholds[f"{threshold:.2f}"]
-        lines.append(
-            f"| enabled | {threshold:.2f} | {row['hits']} | {row['false_hits']} | "
-            f"{_pct(row['false_hit_rate'])} | {_ms(row['avg_latency_ms'])} | "
-            f"{_money(row['total_cost_usd'])} | {_tokens(row['saved_tokens_total'])} |"
-        )
-
-    lines.extend(
-        [
-            "",
-            "## Threshold sweep",
-            "",
-            "| Threshold | Paraphrase semantic hit rate | Near-miss false-hit rate |",
-            "|---|---|---|",
+        missed_ids = [
+            record["id"]
+            for record in results["records"]
+            if record["phase"] == "C_paraphrase"
+            and record["run"] == f"semantic_{default_key}"
+            and not record["hit"]
         ]
-    )
-    for point in results["threshold_sweep"]:
-        lines.append(
-            f"| {point['threshold']:.2f} | "
-            f"{_pct(point['paraphrase_semantic_hit_rate'])} | "
-            f"{_pct(point['near_miss_false_hit_rate'])} |"
+        lines.extend(
+            [
+                "## Findings",
+                "",
+                f"- At the default threshold ({default_key}), semantic matching served "
+                f"{default_c['semantic_hits']}/{default_c['turns']} paraphrases and "
+                f"produced {default_d['false_hits']}/{default_d['turns']} false hits.",
+                f"- Near misses that slipped through at {default_key}: "
+                + (", ".join(f"`{item}`" for item in false_ids) if false_ids else "none")
+                + ".",
+                f"- Paraphrases still missed at {default_key}: "
+                f"{len(missed_ids)}/{results['fixtures']['paraphrase']}.",
+                "- The hashing embedder is lexical: long prompts can exceed a high "
+                "threshold after a single entity swap, while short natural "
+                "paraphrases can score below 0.80. The numeric and negation gates "
+                "stop changed numbers and explicit negations, but not entity swaps.",
+                "- Semantic matching is disabled by default in `config/cache.yaml`; "
+                "these numbers are a reason to keep it opt-in until a neural "
+                "embedder is configured.",
+                "",
+            ]
         )
-
-    default_threshold = 0.92 if 0.92 in thresholds else thresholds[-1]
-    default_key = f"{default_threshold:.2f}"
-    default_c = c_thresholds[default_key]
-    default_d = d_thresholds[default_key]
-    false_ids = [
-        record["id"]
-        for record in results["records"]
-        if record["phase"] == "D_near_miss"
-        and record["run"] == f"semantic_{default_key}"
-        and record["hit"]
-    ]
-    missed_ids = [
-        record["id"]
-        for record in results["records"]
-        if record["phase"] == "C_paraphrase"
-        and record["run"] == f"semantic_{default_key}"
-        and not record["hit"]
-    ]
 
     lines.extend(
         [
-            "",
-            "## Findings",
-            "",
-            f"- At the default threshold ({default_threshold:.2f}), semantic matching "
-            f"served {default_c['semantic_hits']}/{default_c['turns']} paraphrases "
-            f"and produced {default_d['false_hits']}/{default_d['turns']} false "
-            f"hits.",
-            f"- Near misses that slipped through at {default_threshold:.2f}: "
-            + (", ".join(f"`{item}`" for item in false_ids) if false_ids else "none")
-            + ".",
-            f"- Paraphrases still missed at {default_threshold:.2f}: "
-            f"{len(missed_ids)}/{results['fixtures']['paraphrase']}.",
-            "- The hashing embedder is lexical: long prompts can exceed a high "
-            "threshold after a single entity swap, while short natural "
-            "paraphrases can score below 0.80. The numeric and negation gates "
-            "stop changed numbers and explicit negations, but not entity swaps.",
-            "- Semantic matching is disabled by default in `config/cache.yaml`; "
-            "these numbers are a reason to keep it opt-in until a neural "
-            "embedder is configured.",
-            "",
             "## Reproduce",
             "",
             "```bash",
-            "python scripts/cache_eval.py --provider mock",
+            f"python scripts/cache_eval.py --provider mock{phase_arg}",
             "# live mode (requires GROQ_API_KEY in the environment):",
-            "python scripts/cache_eval.py --provider live --yes-i-know-this-spends-quota",
+            "python scripts/cache_eval.py --provider live "
+            "--yes-i-know-this-spends-quota"
+            + phase_arg,
             "```",
             "",
             "## Notes",
             "",
-            "- Phase A uses `bypass_cache=True` so every turn is a guaranteed miss; "
-            "semantic matching is enabled during this phase so each stored answer "
-            "also gets an embedding.",
-            "- Phases C and D use a read-only cache wrapper: a miss cannot add an "
-            "entry, so every threshold is measured against the same 30 golden entries.",
-            "- A near-miss hit is counted as a false hit because every near-miss "
-            "fixture has `same_meaning: false`.",
-            "- The dependency-free `HashingEmbedder` is used; the stopword list and "
-            "feature weights are unchanged from Step 6.",
         ]
     )
+    if a is not None:
+        lines.append(
+            "- Phase A uses `bypass_cache=True` so every turn is a guaranteed miss; "
+            "semantic matching is enabled during this phase so each stored answer "
+            "also gets an embedding."
+        )
+    if c_block is not None or d_block is not None:
+        lines.append(
+            "- Phases C and D use a read-only cache wrapper: a miss cannot add an "
+            "entry, so every threshold is measured against the same warmed entries."
+        )
+        lines.append(
+            "- The dependency-free `HashingEmbedder` is used; the stopword list and "
+            "feature weights are unchanged from Step 6."
+        )
+    if d_block is not None:
+        lines.append(
+            "- A near-miss hit is counted as a false hit because every near-miss "
+            "fixture has `same_meaning: false`."
+        )
     if results["provider"] == "mock":
         lines.append(
             f"- Mock mode: the mock adapter embeds the last user prompt in its "
-            f"answer. Consistency checks failed {results['mock_consistency_failures']} "
-            f"time(s)."
+            f"answer. Consistency checks failed "
+            f"{results['mock_consistency_failures']} time(s)."
         )
     else:
         lines.append(
@@ -805,6 +891,30 @@ def _parse_thresholds(raw: str) -> Tuple[float, ...]:
     if not values:
         raise ValueError("at least one threshold is required")
     return tuple(values)
+
+
+def _parse_phases(raw: str) -> Tuple[str, ...]:
+    """Parse a comma-separated phase list into canonical ``A,B,C,D`` order.
+
+    Args:
+        raw: A string such as ``"A,B"`` or ``"A,B,C,D"``.
+
+    Returns:
+        The requested phases, de-duplicated and in canonical order.
+
+    Raises:
+        ValueError: If a phase is unknown, duplicated, or if B/C/D is
+            requested without A (they need phase A's warmed entries).
+    """
+    seen = {part.strip().upper() for part in raw.split(",") if part.strip()}
+    unknown = seen - set(ALL_PHASES)
+    if unknown:
+        raise ValueError(f"unknown phase(s): {', '.join(sorted(unknown))}")
+    if not seen:
+        raise ValueError("at least one phase is required")
+    if seen & {"B", "C", "D"} and "A" not in seen:
+        raise ValueError("phases B, C and D require phase A to warm the cache")
+    return tuple(phase for phase in ALL_PHASES if phase in seen)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -833,6 +943,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Required for --provider live; confirms real provider quota may be used.",
     )
     parser.add_argument(
+        "--phases",
+        default=",".join(DEFAULT_PHASES),
+        help="Comma-separated phases to run from A,B,C,D (default: A,B,C,D). "
+        "B/C/D require A; use A,B for a cheap live run.",
+    )
+    parser.add_argument(
         "--thresholds",
         default=",".join(f"{value:.2f}" for value in DEFAULT_THRESHOLDS),
         help="Comma-separated cosine thresholds for the semantic sweep.",
@@ -854,6 +970,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     try:
+        phases = _parse_phases(args.phases)
         thresholds = _parse_thresholds(args.thresholds)
         golden, paraphrases, near_misses, golden_by_id = load_and_validate_fixtures()
     except (ValueError, OSError, json.JSONDecodeError) as exc:
@@ -861,9 +978,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     if args.provider == "live":
-        max_calls = len(golden) + (1 + len(thresholds)) * (
-            len(paraphrases) + len(near_misses)
-        )
+        max_calls = 0
+        if "A" in phases:
+            max_calls += len(golden)
+        if "B" in phases:
+            max_calls += len(golden)
+        if "C" in phases:
+            max_calls += (1 + len(thresholds)) * len(paraphrases)
+        if "D" in phases:
+            max_calls += (1 + len(thresholds)) * len(near_misses)
         print(
             f"Live mode: up to {max_calls} provider calls against the configured "
             f"free Groq endpoint.",
@@ -878,6 +1001,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             paraphrases=paraphrases,
             near_misses=near_misses,
             golden_by_id=golden_by_id,
+            phases=phases,
         )
     except Exception as exc:
         print(f"Evaluation failed: {exc}", file=sys.stderr)
@@ -892,13 +1016,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     md_path.write_text(render_markdown(results), encoding="utf-8")
 
-    phases = results["phases"]
-    a = phases["A_cold"]
-    b = phases["B_exact_repeat"]
+    summaries = results["phases"]
     print(f"ModelMesh cache evaluation ({results['provider']})")
+    print(f"  phases: {','.join(results['phases_requested'])}")
     print(f"  candidate: {results['candidate']['endpoint_id']}")
-    print(f"  phase A cold: {a['hits']}/{a['turns']} hits ({_pct(a['hit_rate'])})")
-    print(f"  phase B exact: {b['hits']}/{b['turns']} hits ({_pct(b['hit_rate'])})")
+    if "A_cold" in summaries:
+        a = summaries["A_cold"]
+        print(f"  phase A cold: {a['hits']}/{a['turns']} hits ({_pct(a['hit_rate'])})")
+    if "B_exact_repeat" in summaries:
+        b = summaries["B_exact_repeat"]
+        print(f"  phase B exact: {b['hits']}/{b['turns']} hits ({_pct(b['hit_rate'])})")
     for point in results["threshold_sweep"]:
         print(
             f"  threshold {point['threshold']:.2f}: paraphrase semantic hit rate "

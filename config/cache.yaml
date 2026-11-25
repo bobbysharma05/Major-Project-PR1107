@@ -10,6 +10,11 @@
 # Master switch — set to false to disable all cache reads and writes.
 enabled: true
 
+# Privacy switch.  Cached answers may contain text the user typed, and are
+# stored in the local SQLite DB (which is git-ignored).  Set to false to
+# disable the cache entirely: no reads, no writes, no embeddings.
+store_answers: true
+
 # Seconds before a cache entry is considered stale (default: 24 hours).
 ttl_seconds: 86400
 

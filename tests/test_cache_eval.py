@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 from typing import Any, List, Tuple
 
@@ -47,6 +48,41 @@ def test_parse_thresholds_rejects_out_of_range_values() -> None:
         cache_eval._parse_thresholds("1.20")
     with pytest.raises(ValueError):
         cache_eval._parse_thresholds(" , ")
+
+
+def test_parse_phases_requires_a_for_dependent_phases() -> None:
+    """B/C/D need phase A's warmed entries, and unknown letters are rejected."""
+    assert cache_eval._parse_phases("B,A,B") == ("A", "B")
+    assert cache_eval._parse_phases("A,B") == ("A", "B")
+    with pytest.raises(ValueError, match="require phase A"):
+        cache_eval._parse_phases("B")
+    with pytest.raises(ValueError, match="unknown phase"):
+        cache_eval._parse_phases("A,E")
+
+
+def test_phases_option_runs_only_the_requested_phases(tmp_path: Path) -> None:
+    """``--phases A,B`` produces a report without the semantic sections."""
+    assert (
+        cache_eval.main(
+            [
+                "--provider",
+                "mock",
+                "--phases",
+                "A,B",
+                "--output-dir",
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
+    payload = json.loads((tmp_path / "cache_eval.json").read_text(encoding="utf-8"))
+    assert payload["phases_requested"] == ["A", "B"]
+    assert set(payload["phases"]) == {"A_cold", "B_exact_repeat"}
+    assert payload["threshold_sweep"] == []
+    markdown = (tmp_path / "cache_eval.md").read_text(encoding="utf-8")
+    assert "## Phase C" not in markdown
+    assert "## Threshold sweep" not in markdown
+    assert "--phases A,B" in markdown
 
 
 def test_read_only_cache_ignores_writes_but_delegates_reads() -> None:
