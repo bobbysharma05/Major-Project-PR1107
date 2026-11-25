@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import secrets
 import sqlite3
 import threading
 import time
@@ -18,7 +20,7 @@ from modelmesh.core.types import (
     Usage,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA_SQL = """
 PRAGMA journal_mode = WAL;
@@ -150,6 +152,16 @@ CREATE TABLE IF NOT EXISTS response_cache (
     hit_count INTEGER DEFAULT 0,
     last_hit_at REAL,
     embedding BLOB
+);
+
+CREATE TABLE IF NOT EXISTS api_keys (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    key_hash TEXT NOT NULL UNIQUE,
+    created_at REAL NOT NULL,
+    revoked_at REAL,
+    last_used_at REAL,
+    request_count INTEGER DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id);
@@ -287,6 +299,22 @@ class Storage:
                         ON response_cache(created_at);
                     CREATE INDEX IF NOT EXISTS idx_response_cache_ctx
                         ON response_cache(context_hash, system_hash, params_hash, scope);
+                    """
+                )
+
+                # Schema v4: private API keys.  Only SHA-256 digests are stored;
+                # the idempotent pattern upgrades older databases in place.
+                conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS api_keys (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        key_hash TEXT NOT NULL UNIQUE,
+                        created_at REAL NOT NULL,
+                        revoked_at REAL,
+                        last_used_at REAL,
+                        request_count INTEGER DEFAULT 0
+                    );
                     """
                 )
 
@@ -1111,6 +1139,121 @@ class Storage:
             except (json.JSONDecodeError, TypeError):
                 pass
         return row["cache_status"] or "miss", block
+
+    # --- Private API Key Operations ---
+
+    @staticmethod
+    def _hash_api_key(plaintext: str) -> str:
+        """Return the SHA-256 hex digest of a plaintext API key."""
+        return hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+
+    def create_api_key(self, name: str) -> tuple[str, str]:
+        """Create a private API key and return ``(id, plaintext)``.
+
+        Only the SHA-256 digest is stored.  The plaintext is returned exactly
+        once and must be shown to the user immediately; it cannot be recovered
+        later.
+
+        Args:
+            name: Human-readable label for the key.
+
+        Returns:
+            The generated id and the plaintext key (prefixed with ``mm-``).
+        """
+        key_id = str(uuid.uuid4())
+        plaintext = "mm-" + secrets.token_urlsafe(32)
+        key_hash = self._hash_api_key(plaintext)
+        now = time.time()
+        with self._lock:
+            with self._get_connection() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO api_keys (id, name, key_hash, created_at, request_count)
+                    VALUES (?, ?, ?, ?, 0)
+                    """,
+                    (key_id, name, key_hash, now),
+                )
+                conn.commit()
+        return key_id, plaintext
+
+    def verify_api_key(self, plaintext: str) -> Optional[Dict[str, Any]]:
+        """Verify a plaintext key and record its use.
+
+        Args:
+            plaintext: The ``Authorization: Bearer`` value supplied by a caller.
+
+        Returns:
+            A plain dict describing the live key, or ``None`` when the key is
+            unknown or revoked.  The stored hash is never included.
+        """
+        key_hash = self._hash_api_key(plaintext)
+        now = time.time()
+        with self._lock:
+            with self._get_connection() as conn:
+                row = conn.execute(
+                    """
+                    SELECT id, name, created_at, revoked_at, last_used_at, request_count, key_hash
+                    FROM api_keys
+                    WHERE key_hash = ? AND revoked_at IS NULL
+                    """,
+                    (key_hash,),
+                ).fetchone()
+                if row is None:
+                    return None
+                conn.execute(
+                    """
+                    UPDATE api_keys
+                    SET last_used_at = ?, request_count = request_count + 1
+                    WHERE id = ?
+                    """,
+                    (now, row["id"]),
+                )
+                conn.commit()
+                result = dict(row)
+                result.pop("key_hash", None)
+                result["last_used_at"] = now
+                result["request_count"] = int(row["request_count"] or 0) + 1
+                return result
+
+    def list_api_keys(self) -> List[Dict[str, Any]]:
+        """List all API keys without exposing their hashes.
+
+        Returns:
+            Plain dicts with ``id``, ``name``, ``created_at``, ``revoked_at``,
+            ``last_used_at`` and ``request_count``, oldest first.
+        """
+        with self._lock:
+            with self._get_connection() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT id, name, created_at, revoked_at, last_used_at, request_count
+                    FROM api_keys
+                    ORDER BY created_at, id
+                    """
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def revoke_api_key(self, key_id: str) -> bool:
+        """Revoke a live API key by id.
+
+        Args:
+            key_id: Identifier returned by :meth:`create_api_key`.
+
+        Returns:
+            ``True`` if a live key was revoked, ``False`` if the id was unknown
+            or the key had already been revoked.
+        """
+        with self._lock:
+            with self._get_connection() as conn:
+                cur = conn.execute(
+                    """
+                    UPDATE api_keys SET revoked_at = ?
+                    WHERE id = ? AND revoked_at IS NULL
+                    """,
+                    (time.time(), key_id),
+                )
+                conn.commit()
+                return cur.rowcount > 0
 
     def get_usage_summary(self) -> Dict[str, Any]:
         """Aggregate usage metrics by model, provider/endpoint, and overall total."""

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
@@ -147,7 +148,77 @@ def _run_cache_command(argv: List[str]) -> int:
     return 1
 
 
+def _format_key_time(timestamp: Optional[float]) -> str:
+    """Format an API-key timestamp for display, or ``never`` when unset."""
+    if not timestamp:
+        return "never"
+    return datetime.fromtimestamp(timestamp).isoformat(timespec="seconds")
+
+
+def _run_keys_command(argv: List[str]) -> int:
+    """Handle ``modelmesh-cli keys create|list|revoke``.
+
+    Args:
+        argv: Arguments after the ``keys`` token.
+
+    Returns:
+        Process exit code: 0 on success, 1 on a missing/unknown command.
+    """
+    storage = Storage()
+    if not argv:
+        print("Usage: modelmesh-cli keys <create|list|revoke>")
+        return 1
+
+    cmd = argv[0]
+    if cmd == "create":
+        name = " ".join(argv[1:]).strip()
+        if not name:
+            print("Usage: modelmesh-cli keys create <name>")
+            return 1
+        key_id, plaintext = storage.create_api_key(name)
+        print(f"Created API key '{name}' (id: {key_id})")
+        print(f"Key: {plaintext}")
+        print("Store it now, it cannot be shown again.")
+        return 0
+
+    if cmd == "list":
+        rows = storage.list_api_keys()
+        if not rows:
+            print("No API keys.")
+            return 0
+        print(
+            f"{'ID':<38} {'Name':<20} {'Created':<22} {'Last used':<22} "
+            f"{'Requests':>8}  Revoked"
+        )
+        for row in rows:
+            print(
+                f"{row['id']:<38} {row['name']:<20} "
+                f"{_format_key_time(row['created_at']):<22} "
+                f"{_format_key_time(row['last_used_at']):<22} "
+                f"{row['request_count']:>8}  "
+                f"{'yes' if row['revoked_at'] else 'no'}"
+            )
+        return 0
+
+    if cmd == "revoke":
+        if len(argv) < 2:
+            print("Usage: modelmesh-cli keys revoke <id>")
+            return 1
+        if storage.revoke_api_key(argv[1]):
+            print(f"Revoked API key {argv[1]}")
+            return 0
+        print(f"Unknown or already revoked API key: {argv[1]}")
+        return 1
+
+    print(f"Unknown keys command: {cmd}")
+    return 1
+
+
 def main() -> int:
+    # Check if the private API-key subcommand is invoked
+    if len(sys.argv) > 1 and sys.argv[1] == "keys":
+        return _run_keys_command(sys.argv[2:])
+
     # Check if cache subcommand is invoked
     if len(sys.argv) > 1 and sys.argv[1] == "cache":
         return _run_cache_command(sys.argv[2:])
